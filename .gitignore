@@ -1,0 +1,7 @@
+# FortuneHub Backend Server
+
+node_modules/
+.env
+orders.db
+*.log
+.DS_Store
