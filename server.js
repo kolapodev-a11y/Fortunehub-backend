@@ -91,10 +91,10 @@ app.post('/api/verify-payment', async (req, res) => {
     console.log('🔍 Verifying payment reference:', reference);
 
     const paystackResponse = await axios.get(
-      `https://api.paystack.co/transaction/verify/${reference}`,
+      https://api.paystack.co/transaction/verify/${reference},
       {
         headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`
+          Authorization: Bearer ${PAYSTACK_SECRET_KEY}
         }
       }
     );
@@ -229,7 +229,7 @@ function sendOrderEmail(orderData) {
   } = orderData;
 
   const formatCurrency = (amountInKobo) => {
-    return `₦${(amountInKobo / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })}`;
+    return ₦${(amountInKobo / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })};
   };
 
   let cartItemsHtml = '';
@@ -239,40 +239,40 @@ function sendOrderEmail(orderData) {
       const qty = Number(item?.quantity || 1);
       const priceKobo = Number(item?.price || 0);
       cartItemsHtml += `
-        <tr>
-          <td style="padding: 10px; border-bottom: 1px solid #eee;">${name}</td>
-          <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: center;">${qty}</td>
-          <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">${formatCurrency(priceKobo)}</td>
-          <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">${formatCurrency(priceKobo * qty)}</td>
-        </tr>
+        
+          ${name}
+          ${qty}
+          ${formatCurrency(priceKobo)}
+          ${formatCurrency(priceKobo * qty)}
+        
       `;
     });
   } else {
     cartItemsHtml = `
-      <tr>
-        <td colspan="4" style="padding: 10px; text-align:center; color:#666;">
+      
+        
           (No cart items received)
-        </td>
-      </tr>
+        
+      
     `;
   }
 
   // WhatsApp link safety
   const cleanPhone = String(customerPhone || '').trim();
   const whatsappNumber = cleanPhone && cleanPhone !== 'N/A'
-    ? cleanPhone.replace(/^0/, '234').replace(/[^\d]/g, '')
+    ? cleanPhone.replace(/^0/, '234').replace(//g, '')
     : '';
 
-  const whatsappLink = whatsappNumber ? `https://wa.me/${whatsappNumber}` : '#';
+  const whatsappLink = whatsappNumber ? https://wa.me/${whatsappNumber} : '#';
 
   // ============================================================
   // 📧 OWNER EMAIL (Admin Notification)
   // ============================================================
   const ownerEmailHtml = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <style>
+    
+    
+    
+      
         body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
         .container { max-width: 600px; margin: 0 auto; padding: 20px; }
         .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
@@ -284,100 +284,100 @@ function sendOrderEmail(orderData) {
         .total-row { background: #667eea; color: white; font-weight: bold; }
         .button { display: inline-block; padding: 12px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }
         .button.disabled { background: #999; pointer-events: none; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="header">
-          <h1>🎉 New Order Received!</h1>
-          <p>FortuneHub E-Commerce</p>
-        </div>
+      
+    
+    
+      
+        
+          🎉 New Order Received!
+          FortuneHub E-Commerce
+        
 
-        <div class="content">
-          <div class="order-box">
-            <h2>📦 Order Details</h2>
-            <div class="info-row">
-              <span class="label">Order Reference:</span>
-              <span>${orderReference}</span>
-            </div>
-            <div class="info-row">
-              <span class="label">Order Date:</span>
-              <span>${new Date().toLocaleString()}</span>
-            </div>
-          </div>
+        
+          
+            📦 Order Details
+            
+              Order Reference:
+              ${orderReference}
+            
+            
+              Order Date:
+              ${new Date().toLocaleString()}
+            
+          
 
-          <div class="order-box">
-            <h2>👤 Customer Information</h2>
-            <div class="info-row">
-              <span class="label">Name:</span>
-              <span>${customerName}</span>
-            </div>
-            <div class="info-row">
-              <span class="label">Email:</span>
-              <span>${customerEmail}</span>
-            </div>
-            <div class="info-row">
-              <span class="label">Phone (WhatsApp):</span>
-              <span>${customerPhone}</span>
-            </div>
-            <div class="info-row">
-              <span class="label">Shipping State:</span>
-              <span>${shippingState}</span>
-            </div>
-          </div>
+          
+            👤 Customer Information
+            
+              Name:
+              ${customerName}
+            
+            
+              Email:
+              ${customerEmail}
+            
+            
+              Phone (WhatsApp):
+              ${customerPhone}
+            
+            
+              Shipping State:
+              ${shippingState}
+            
+          
 
-          <div class="order-box">
-            <h2>🛍️ Order Items</h2>
-            <table class="table">
-              <thead>
-                <tr style="background: #f5f5f5;">
-                  <th style="padding: 10px; text-align: left;">Product</th>
-                  <th style="padding: 10px; text-align: center;">Quantity</th>
-                  <th style="padding: 10px; text-align: right;">Price</th>
-                  <th style="padding: 10px; text-align: right;">Total</th>
-                </tr>
-              </thead>
-              <tbody>
+          
+            🛍️ Order Items
+            
+              
+                
+                  Product
+                  Quantity
+                  Price
+                  Total
+                
+              
+              
                 ${cartItemsHtml}
-              </tbody>
-            </table>
+              
+            
 
-            <div class="info-row">
-              <span class="label">Subtotal:</span>
-              <span>${formatCurrency(subtotal)}</span>
-            </div>
-            <div class="info-row">
-              <span class="label">Shipping Fee:</span>
-              <span>₦${Number(shippingFee).toLocaleString('en-NG', { minimumFractionDigits: 2 })}</span>
-            </div>
-            <div class="info-row total-row" style="padding: 15px; font-size: 18px;">
-              <span>TOTAL PAID:</span>
-              <span>${formatCurrency(totalAmount)}</span>
-            </div>
-          </div>
+            
+              Subtotal:
+              ${formatCurrency(subtotal)}
+            
+            
+              Shipping Fee:
+              ₦${Number(shippingFee).toLocaleString('en-NG', { minimumFractionDigits: 2 })}
+            
+            
+              TOTAL PAID:
+              ${formatCurrency(totalAmount)}
+            
+          
 
-          <div style="text-align: center; margin-top: 30px;">
-            <p><strong>⚡ Action Required:</strong></p>
-            <p>Please contact the customer via WhatsApp or email to arrange delivery.</p>
+          
+            ⚡ Action Required:
+            Please contact the customer via WhatsApp or email to arrange delivery.
 
-            <a href="${whatsappLink}" class="button ${whatsappNumber ? '' : 'disabled'}">
+            
               💬 Contact via WhatsApp
-            </a>
-          </div>
-        </div>
-      </div>
-    </body>
-    </html>
+            
+          
+        
+      
+    
+    
   `;
 
   // ============================================================
   // 📧 CUSTOMER EMAIL (Order Confirmation)
   // ============================================================
   const customerEmailHtml = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <style>
+    
+    
+    
+      
         body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; background: #f4f4f4; margin: 0; padding: 0; }
         .container { max-width: 600px; margin: 20px auto; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
         .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px 20px; text-align: center; }
@@ -397,96 +397,96 @@ function sendOrderEmail(orderData) {
         .grand-total { font-size: 24px; font-weight: bold; padding-top: 10px; border-top: 2px solid rgba(255,255,255,0.3); margin-top: 10px; }
         .footer { background: #f9fafb; padding: 30px; text-align: center; color: #666; }
         .support-box { background: white; padding: 20px; border-radius: 8px; margin-top: 20px; border: 1px solid #e5e7eb; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="header">
-          <h1>✨ Thank You for Your Order!</h1>
-          <p>Your order has been confirmed and is being processed</p>
-        </div>
+      
+    
+    
+      
+        
+          ✨ Thank You for Your Order!
+          Your order has been confirmed and is being processed
+        
 
-        <div class="content">
-          <div style="text-align: center;">
-            <span class="success-badge">✅ Payment Successful</span>
-          </div>
+        
+          
+            ✅ Payment Successful
+          
 
-          <div class="order-box">
-            <h2 style="margin-top: 0; color: #667eea;">📦 Order Information</h2>
-            <div class="info-row">
-              <span class="label">Order Reference:</span>
-              <span class="value">${orderReference}</span>
-            </div>
-            <div class="info-row">
-              <span class="label">Order Date:</span>
-              <span class="value">${new Date().toLocaleString('en-NG', { dateStyle: 'full', timeStyle: 'short' })}</span>
-            </div>
-            <div class="info-row">
-              <span class="label">Customer Name:</span>
-              <span class="value">${customerName}</span>
-            </div>
-            <div class="info-row">
-              <span class="label">Email:</span>
-              <span class="value">${customerEmail}</span>
-            </div>
-            <div class="info-row">
-              <span class="label">Phone:</span>
-              <span class="value">${customerPhone}</span>
-            </div>
-            <div class="info-row">
-              <span class="label">Shipping State:</span>
-              <span class="value">${shippingState}</span>
-            </div>
-          </div>
+          
+            📦 Order Information
+            
+              Order Reference:
+              ${orderReference}
+            
+            
+              Order Date:
+              ${new Date().toLocaleString('en-NG', { dateStyle: 'full', timeStyle: 'short' })}
+            
+            
+              Customer Name:
+              ${customerName}
+            
+            
+              Email:
+              ${customerEmail}
+            
+            
+              Phone:
+              ${customerPhone}
+            
+            
+              Shipping State:
+              ${shippingState}
+            
+          
 
-          <h2 style="color: #667eea;">🛍️ Order Items</h2>
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Product</th>
-                <th style="text-align: center;">Qty</th>
-                <th style="text-align: right;">Price</th>
-                <th style="text-align: right;">Total</th>
-              </tr>
-            </thead>
-            <tbody>
+          🛍️ Order Items
+          
+            
+              
+                Product
+                Qty
+                Price
+                Total
+              
+            
+            
               ${cartItemsHtml}
-            </tbody>
-          </table>
+            
+          
 
-          <div class="total-section">
-            <div class="total-row">
-              <span>Subtotal:</span>
-              <span>${formatCurrency(subtotal)}</span>
-            </div>
-            <div class="total-row">
-              <span>Shipping Fee (${shippingState}):</span>
-              <span>₦${Number(shippingFee).toLocaleString('en-NG', { minimumFractionDigits: 2 })}</span>
-            </div>
-            <div class="total-row grand-total">
-              <span>TOTAL PAID:</span>
-              <span>${formatCurrency(totalAmount)}</span>
-            </div>
-          </div>
+          
+            
+              Subtotal:
+              ${formatCurrency(subtotal)}
+            
+            
+              Shipping Fee (${shippingState}):
+              ₦${Number(shippingFee).toLocaleString('en-NG', { minimumFractionDigits: 2 })}
+            
+            
+              TOTAL PAID:
+              ${formatCurrency(totalAmount)}
+            
+          
 
-          <div class="support-box">
-            <h3 style="margin-top: 0; color: #667eea;">📞 What's Next?</h3>
-            <p>Our team will contact you shortly via WhatsApp or phone to confirm your delivery details.</p>
-            <p><strong>Estimated Delivery:</strong> 2-5 business days (depending on your location)</p>
-            <p style="margin-bottom: 0;">If you have any questions, please don't hesitate to reach out!</p>
-          </div>
-        </div>
+          
+            📞 What's Next?
+            Our team will contact you shortly via WhatsApp or phone to confirm your delivery details.
+            Estimated Delivery: 2-5 business days (depending on your location)
+            If you have any questions, please don't hesitate to reach out!
+          
+        
 
-        <div class="footer">
-          <p style="margin: 0 0 10px;"><strong>FortuneHub E-Commerce</strong></p>
-          <p style="margin: 0; font-size: 14px;">Thank you for shopping with us! 🎉</p>
-          <p style="margin: 10px 0 0; font-size: 12px; color: #999;">
+        
+          FortuneHub E-Commerce
+          Thank you for shopping with us! 🎉
+          
             Keep this email for your records. Order Reference: ${orderReference}
-          </p>
-        </div>
-      </div>
-    </body>
-    </html>
+          
+        
+      
+    
+    
   `;
 
   // ============================================================
@@ -495,7 +495,7 @@ function sendOrderEmail(orderData) {
   const ownerMailOptions = {
     from: process.env.EMAIL_USER,
     to: process.env.OWNER_EMAIL,
-    subject: `🛒 New Order - ${orderReference} - ${customerName}`,
+    subject: 🛒 New Order - ${orderReference} - ${customerName},
     html: ownerEmailHtml
   };
 
@@ -510,7 +510,7 @@ function sendOrderEmail(orderData) {
   const customerMailOptions = {
     from: process.env.EMAIL_USER,
     to: customerEmail,
-    subject: `✅ Order Confirmation - ${orderReference} - FortuneHub`,
+    subject: ✅ Order Confirmation - ${orderReference} - FortuneHub,
     html: customerEmailHtml
   };
 
@@ -588,15 +588,15 @@ app.post('/api/orders/search', (req, res) => {
 });
 
 // ================================================================
-// START SERVER
+// START SERVER - ✅ FIXED TEMPLATE LITERALS
 // ================================================================
 app.listen(PORT, () => {
   console.log('');
   console.log('🚀 ================================');
   console.log('🚀 FortuneHub Backend Server Started!');
   console.log('🚀 ================================');
-  console.log('📡 Server running on port ${PORT}');
-  console.log('🌐 Local: http://localhost:${PORT}');
+  console.log(📡 Server running on port ${PORT});  // ✅ FIXED
+  console.log(🌐 Local: http://localhost:${PORT}); // ✅ FIXED
   console.log('💾 Database: orders.db');
   console.log('✉️  Email notifications: Enabled (Owner + Customer)');
   console.log('📜 Transaction history: Enabled');
