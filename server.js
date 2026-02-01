@@ -595,8 +595,8 @@ app.listen(PORT, () => {
   console.log('🚀 ================================');
   console.log('🚀 FortuneHub Backend Server Started!');
   console.log('🚀 ================================');
-  console.log(📡 Server running on port ${PORT});  // ✅ FIXED
-  console.log(🌐 Local: http://localhost:${PORT}); // ✅ FIXED
+  console.log(`📡 Server running on port ${PORT}`);  // ✅ FIXED
+  console.log(`🌐 Local: http://localhost:${PORT}`); // ✅ FIXED
   console.log('💾 Database: orders.db');
   console.log('✉️  Email notifications: Enabled (Owner + Customer)');
   console.log('📜 Transaction history: Enabled');
