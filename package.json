@@ -1,21 +1,15 @@
 {
   "name": "fortunehub-backend",
   "version": "1.0.0",
-  "description": "Backend server for FortuneHub E-Commerce Website",
+  "description": "FortuneHub E-commerce Backend with Payment Processing",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
-  "keywords": [
-    "ecommerce",
-    "backend",
-    "paystack",
-    "nodejs",
-    "express"
-  ],
-  "author": "FortuneHub Team",
-  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
