@@ -49,13 +49,28 @@ db.run(`
 });
 
 // ================================================================
-// EMAIL CONFIGURATION
+// EMAIL CONFIGURATION - ✅ PRODUCTION-READY
 // ================================================================
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false, // Use TLS
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASSWORD
+  },
+  tls: {
+    rejectUnauthorized: false // Allow self-signed certificates in production
+  }
+});
+
+// ✅ Verify email configuration on startup
+transporter.verify((error, success) => {
+  if (error) {
+    console.error('❌ Email configuration error:', error);
+    console.error('⚠️  Please check your EMAIL_USER and EMAIL_PASSWORD environment variables');
+  } else {
+    console.log('✅ Email server is ready to send messages');
   }
 });
 
@@ -71,7 +86,9 @@ app.get('/', (req, res) => {
   res.json({
     message: '🚀 FortuneHub Backend Server is Running!',
     status: 'active',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    emailConfigured: !!process.env.EMAIL_USER && !!process.env.EMAIL_PASSWORD,
+    ownerEmailConfigured: !!process.env.OWNER_EMAIL
   });
 });
 
@@ -80,6 +97,8 @@ app.get('/', (req, res) => {
 // ================================================================
 app.post('/api/verify-payment', async (req, res) => {
   console.log('📨 Payment verification request received');
+  console.log('📧 Email User:', process.env.EMAIL_USER ? 'Configured ✅' : 'Missing ❌');
+  console.log('📧 Owner Email:', process.env.OWNER_EMAIL ? 'Configured ✅' : 'Missing ❌');
 
   try {
     const { reference } = req.body;
@@ -91,10 +110,10 @@ app.post('/api/verify-payment', async (req, res) => {
     console.log('🔍 Verifying payment reference:', reference);
 
     const paystackResponse = await axios.get(
-      https://api.paystack.co/transaction/verify/${reference},
+      `https://api.paystack.co/transaction/verify/${reference}`,
       {
         headers: {
-          Authorization: Bearer ${PAYSTACK_SECRET_KEY}
+          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`
         }
       }
     );
@@ -154,6 +173,7 @@ app.post('/api/verify-payment', async (req, res) => {
     const cartItemsJson = JSON.stringify(Array.isArray(cartItems) ? cartItems : []);
 
     console.log('💾 Saving order to database...');
+    console.log('📧 Customer Email extracted:', customerEmail);
 
     const insertQuery = `
       INSERT INTO orders (
@@ -183,7 +203,7 @@ app.post('/api/verify-payment', async (req, res) => {
 
       console.log('✅ Order saved with ID:', this.lastID);
 
-      // 📧 Send emails to BOTH owner and customer
+      // 📧 Send emails to BOTH owner and customer (async - non-blocking)
       sendOrderEmail({
         orderReference: reference,
         customerName,
@@ -197,7 +217,7 @@ app.post('/api/verify-payment', async (req, res) => {
       });
 
       res.json({
-        message: 'Payment verified and order saved successfully! Confirmation email sent.',
+        message: 'Payment verified and order saved successfully! Confirmation emails are being sent.',
         reference,
         orderId: this.lastID
       });
@@ -213,9 +233,9 @@ app.post('/api/verify-payment', async (req, res) => {
 });
 
 // ================================================================
-// EMAIL SENDING FUNCTION (SENDS TO BOTH OWNER & CUSTOMER)
+// EMAIL SENDING FUNCTION - ✅ FIXED TO SEND TO BOTH OWNER & CUSTOMER
 // ================================================================
-function sendOrderEmail(orderData) {
+async function sendOrderEmail(orderData) {
   const {
     orderReference,
     customerName,
@@ -228,8 +248,12 @@ function sendOrderEmail(orderData) {
     cartItems
   } = orderData;
 
+  console.log('📧 Starting email sending process...');
+  console.log('📧 Owner Email:', process.env.OWNER_EMAIL);
+  console.log('📧 Customer Email:', customerEmail);
+
   const formatCurrency = (amountInKobo) => {
-    return ₦${(amountInKobo / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })};
+    return `₦${(amountInKobo / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })}`;
   };
 
   let cartItemsHtml = '';
@@ -239,40 +263,40 @@ function sendOrderEmail(orderData) {
       const qty = Number(item?.quantity || 1);
       const priceKobo = Number(item?.price || 0);
       cartItemsHtml += `
-        
-          ${name}
-          ${qty}
-          ${formatCurrency(priceKobo)}
-          ${formatCurrency(priceKobo * qty)}
-        
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #eee;">${name}</td>
+          <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: center;">${qty}</td>
+          <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">${formatCurrency(priceKobo)}</td>
+          <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">${formatCurrency(priceKobo * qty)}</td>
+        </tr>
       `;
     });
   } else {
     cartItemsHtml = `
-      
-        
+      <tr>
+        <td colspan="4" style="padding: 10px; text-align:center; color:#666;">
           (No cart items received)
-        
-      
+        </td>
+      </tr>
     `;
   }
 
   // WhatsApp link safety
   const cleanPhone = String(customerPhone || '').trim();
   const whatsappNumber = cleanPhone && cleanPhone !== 'N/A'
-    ? cleanPhone.replace(/^0/, '234').replace(//g, '')
+    ? cleanPhone.replace(/^0/, '234').replace(/[^\d]/g, '')
     : '';
 
-  const whatsappLink = whatsappNumber ? https://wa.me/${whatsappNumber} : '#';
+  const whatsappLink = whatsappNumber ? `https://wa.me/${whatsappNumber}` : '#';
 
   // ============================================================
   // 📧 OWNER EMAIL (Admin Notification)
   // ============================================================
   const ownerEmailHtml = `
-    
-    
-    
-      
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
         body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
         .container { max-width: 600px; margin: 0 auto; padding: 20px; }
         .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
@@ -284,100 +308,100 @@ function sendOrderEmail(orderData) {
         .total-row { background: #667eea; color: white; font-weight: bold; }
         .button { display: inline-block; padding: 12px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }
         .button.disabled { background: #999; pointer-events: none; }
-      
-    
-    
-      
-        
-          🎉 New Order Received!
-          FortuneHub E-Commerce
-        
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="header">
+          <h1>🎉 New Order Received!</h1>
+          <p>FortuneHub E-Commerce</p>
+        </div>
 
-        
-          
-            📦 Order Details
-            
-              Order Reference:
-              ${orderReference}
-            
-            
-              Order Date:
-              ${new Date().toLocaleString()}
-            
-          
+        <div class="content">
+          <div class="order-box">
+            <h2>📦 Order Details</h2>
+            <div class="info-row">
+              <span class="label">Order Reference:</span>
+              <span>${orderReference}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Order Date:</span>
+              <span>${new Date().toLocaleString()}</span>
+            </div>
+          </div>
 
-          
-            👤 Customer Information
-            
-              Name:
-              ${customerName}
-            
-            
-              Email:
-              ${customerEmail}
-            
-            
-              Phone (WhatsApp):
-              ${customerPhone}
-            
-            
-              Shipping State:
-              ${shippingState}
-            
-          
+          <div class="order-box">
+            <h2>👤 Customer Information</h2>
+            <div class="info-row">
+              <span class="label">Name:</span>
+              <span>${customerName}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Email:</span>
+              <span>${customerEmail}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Phone (WhatsApp):</span>
+              <span>${customerPhone}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Shipping State:</span>
+              <span>${shippingState}</span>
+            </div>
+          </div>
 
-          
-            🛍️ Order Items
-            
-              
-                
-                  Product
-                  Quantity
-                  Price
-                  Total
-                
-              
-              
+          <div class="order-box">
+            <h2>🛍️ Order Items</h2>
+            <table class="table">
+              <thead>
+                <tr style="background: #f5f5f5;">
+                  <th style="padding: 10px; text-align: left;">Product</th>
+                  <th style="padding: 10px; text-align: center;">Quantity</th>
+                  <th style="padding: 10px; text-align: right;">Price</th>
+                  <th style="padding: 10px; text-align: right;">Total</th>
+                </tr>
+              </thead>
+              <tbody>
                 ${cartItemsHtml}
-              
-            
+              </tbody>
+            </table>
 
-            
-              Subtotal:
-              ${formatCurrency(subtotal)}
-            
-            
-              Shipping Fee:
-              ₦${Number(shippingFee).toLocaleString('en-NG', { minimumFractionDigits: 2 })}
-            
-            
-              TOTAL PAID:
-              ${formatCurrency(totalAmount)}
-            
-          
+            <div class="info-row">
+              <span class="label">Subtotal:</span>
+              <span>${formatCurrency(subtotal)}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Shipping Fee:</span>
+              <span>₦${Number(shippingFee).toLocaleString('en-NG', { minimumFractionDigits: 2 })}</span>
+            </div>
+            <div class="info-row total-row" style="padding: 15px; font-size: 18px;">
+              <span>TOTAL PAID:</span>
+              <span>${formatCurrency(totalAmount)}</span>
+            </div>
+          </div>
 
-          
-            ⚡ Action Required:
-            Please contact the customer via WhatsApp or email to arrange delivery.
+          <div style="text-align: center; margin-top: 30px;">
+            <p><strong>⚡ Action Required:</strong></p>
+            <p>Please contact the customer via WhatsApp or email to arrange delivery.</p>
 
-            
+            <a href="${whatsappLink}" class="button ${whatsappNumber ? '' : 'disabled'}">
               💬 Contact via WhatsApp
-            
-          
-        
-      
-    
-    
+            </a>
+          </div>
+        </div>
+      </div>
+    </body>
+    </html>
   `;
 
   // ============================================================
   // 📧 CUSTOMER EMAIL (Order Confirmation)
   // ============================================================
   const customerEmailHtml = `
-    
-    
-    
-      
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
         body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; background: #f4f4f4; margin: 0; padding: 0; }
         .container { max-width: 600px; margin: 20px auto; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
         .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px 20px; text-align: center; }
@@ -397,127 +421,148 @@ function sendOrderEmail(orderData) {
         .grand-total { font-size: 24px; font-weight: bold; padding-top: 10px; border-top: 2px solid rgba(255,255,255,0.3); margin-top: 10px; }
         .footer { background: #f9fafb; padding: 30px; text-align: center; color: #666; }
         .support-box { background: white; padding: 20px; border-radius: 8px; margin-top: 20px; border: 1px solid #e5e7eb; }
-      
-    
-    
-      
-        
-          ✨ Thank You for Your Order!
-          Your order has been confirmed and is being processed
-        
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="header">
+          <h1>✨ Thank You for Your Order!</h1>
+          <p>Your order has been confirmed and is being processed</p>
+        </div>
 
-        
-          
-            ✅ Payment Successful
-          
+        <div class="content">
+          <div style="text-align: center;">
+            <span class="success-badge">✅ Payment Successful</span>
+          </div>
 
-          
-            📦 Order Information
-            
-              Order Reference:
-              ${orderReference}
-            
-            
-              Order Date:
-              ${new Date().toLocaleString('en-NG', { dateStyle: 'full', timeStyle: 'short' })}
-            
-            
-              Customer Name:
-              ${customerName}
-            
-            
-              Email:
-              ${customerEmail}
-            
-            
-              Phone:
-              ${customerPhone}
-            
-            
-              Shipping State:
-              ${shippingState}
-            
-          
+          <div class="order-box">
+            <h2 style="margin-top: 0; color: #667eea;">📦 Order Information</h2>
+            <div class="info-row">
+              <span class="label">Order Reference:</span>
+              <span class="value">${orderReference}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Order Date:</span>
+              <span class="value">${new Date().toLocaleString('en-NG', { dateStyle: 'full', timeStyle: 'short' })}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Customer Name:</span>
+              <span class="value">${customerName}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Email:</span>
+              <span class="value">${customerEmail}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Phone:</span>
+              <span class="value">${customerPhone}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Shipping State:</span>
+              <span class="value">${shippingState}</span>
+            </div>
+          </div>
 
-          🛍️ Order Items
-          
-            
-              
-                Product
-                Qty
-                Price
-                Total
-              
-            
-            
+          <h2 style="color: #667eea;">🛍️ Order Items</h2>
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th style="text-align: center;">Qty</th>
+                <th style="text-align: right;">Price</th>
+                <th style="text-align: right;">Total</th>
+              </tr>
+            </thead>
+            <tbody>
               ${cartItemsHtml}
-            
-          
+            </tbody>
+          </table>
 
-          
-            
-              Subtotal:
-              ${formatCurrency(subtotal)}
-            
-            
-              Shipping Fee (${shippingState}):
-              ₦${Number(shippingFee).toLocaleString('en-NG', { minimumFractionDigits: 2 })}
-            
-            
-              TOTAL PAID:
-              ${formatCurrency(totalAmount)}
-            
-          
+          <div class="total-section">
+            <div class="total-row">
+              <span>Subtotal:</span>
+              <span>${formatCurrency(subtotal)}</span>
+            </div>
+            <div class="total-row">
+              <span>Shipping Fee (${shippingState}):</span>
+              <span>₦${Number(shippingFee).toLocaleString('en-NG', { minimumFractionDigits: 2 })}</span>
+            </div>
+            <div class="total-row grand-total">
+              <span>TOTAL PAID:</span>
+              <span>${formatCurrency(totalAmount)}</span>
+            </div>
+          </div>
 
-          
-            📞 What's Next?
-            Our team will contact you shortly via WhatsApp or phone to confirm your delivery details.
-            Estimated Delivery: 2-5 business days (depending on your location)
-            If you have any questions, please don't hesitate to reach out!
-          
-        
+          <div class="support-box">
+            <h3 style="margin-top: 0; color: #667eea;">📞 What's Next?</h3>
+            <p>Our team will contact you shortly via WhatsApp or phone to confirm your delivery details.</p>
+            <p><strong>Estimated Delivery:</strong> 2-5 business days (depending on your location)</p>
+            <p style="margin-bottom: 0;">If you have any questions, please don't hesitate to reach out!</p>
+          </div>
+        </div>
 
-        
-          FortuneHub E-Commerce
-          Thank you for shopping with us! 🎉
-          
+        <div class="footer">
+          <p style="margin: 0 0 10px;"><strong>FortuneHub E-Commerce</strong></p>
+          <p style="margin: 0; font-size: 14px;">Thank you for shopping with us! 🎉</p>
+          <p style="margin: 10px 0 0; font-size: 12px; color: #999;">
             Keep this email for your records. Order Reference: ${orderReference}
-          
-        
-      
-    
-    
+          </p>
+        </div>
+      </div>
+    </body>
+    </html>
   `;
 
   // ============================================================
-  // 📤 SEND EMAIL TO OWNER
+  // 📤 SEND EMAIL TO OWNER (Admin)
   // ============================================================
-  const ownerMailOptions = {
-    from: process.env.EMAIL_USER,
-    to: process.env.OWNER_EMAIL,
-    subject: 🛒 New Order - ${orderReference} - ${customerName},
-    html: ownerEmailHtml
-  };
+  try {
+    if (process.env.OWNER_EMAIL) {
+      console.log('📤 Sending email to owner:', process.env.OWNER_EMAIL);
+      
+      const ownerMailOptions = {
+        from: `"FortuneHub Orders" <${process.env.EMAIL_USER}>`,
+        to: process.env.OWNER_EMAIL,
+        subject: `🛒 New Order - ${orderReference} - ${customerName}`,
+        html: ownerEmailHtml
+      };
 
-  transporter.sendMail(ownerMailOptions, (error, info) => {
-    if (error) console.error('❌ Owner email failed:', error);
-    else console.log('✅ Owner email sent:', info.response);
-  });
+      const ownerInfo = await transporter.sendMail(ownerMailOptions);
+      console.log('✅ Owner email sent successfully!');
+      console.log('   Message ID:', ownerInfo.messageId);
+    } else {
+      console.error('❌ OWNER_EMAIL not configured in environment variables');
+    }
+  } catch (error) {
+    console.error('❌ Failed to send owner email:', error.message);
+    console.error('   Error details:', error);
+  }
 
   // ============================================================
   // 📤 SEND CONFIRMATION EMAIL TO CUSTOMER
   // ============================================================
-  const customerMailOptions = {
-    from: process.env.EMAIL_USER,
-    to: customerEmail,
-    subject: ✅ Order Confirmation - ${orderReference} - FortuneHub,
-    html: customerEmailHtml
-  };
+  try {
+    if (customerEmail && customerEmail !== 'unknown@email') {
+      console.log('📤 Sending confirmation email to customer:', customerEmail);
+      
+      const customerMailOptions = {
+        from: `"FortuneHub" <${process.env.EMAIL_USER}>`,
+        to: customerEmail,
+        subject: `✅ Order Confirmation - ${orderReference} - FortuneHub`,
+        html: customerEmailHtml
+      };
 
-  transporter.sendMail(customerMailOptions, (error, info) => {
-    if (error) console.error('❌ Customer email failed:', error);
-    else console.log('✅ Customer confirmation email sent to:', customerEmail);
-  });
+      const customerInfo = await transporter.sendMail(customerMailOptions);
+      console.log('✅ Customer confirmation email sent successfully!');
+      console.log('   Message ID:', customerInfo.messageId);
+      console.log('   Sent to:', customerEmail);
+    } else {
+      console.error('❌ Invalid customer email address:', customerEmail);
+    }
+  } catch (error) {
+    console.error('❌ Failed to send customer email:', error.message);
+    console.error('   Error details:', error);
+  }
 }
 
 // ================================================================
@@ -588,6 +633,52 @@ app.post('/api/orders/search', (req, res) => {
 });
 
 // ================================================================
+// 🆕 TEST EMAIL ENDPOINT (for debugging)
+// ================================================================
+app.post('/api/test-email', async (req, res) => {
+  const { testEmail } = req.body;
+  
+  if (!testEmail) {
+    return res.status(400).json({ error: 'testEmail is required' });
+  }
+
+  try {
+    console.log('🧪 Testing email to:', testEmail);
+    
+    const mailOptions = {
+      from: `"FortuneHub Test" <${process.env.EMAIL_USER}>`,
+      to: testEmail,
+      subject: '✅ Test Email from FortuneHub Backend',
+      html: `
+        <div style="font-family: Arial; padding: 20px;">
+          <h2>✅ Email Configuration Working!</h2>
+          <p>This is a test email from your FortuneHub backend server.</p>
+          <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
+          <p>If you received this, your email configuration is correct! 🎉</p>
+        </div>
+      `
+    };
+
+    const info = await transporter.sendMail(mailOptions);
+    console.log('✅ Test email sent:', info.messageId);
+    
+    res.json({
+      success: true,
+      message: 'Test email sent successfully!',
+      messageId: info.messageId,
+      recipient: testEmail
+    });
+  } catch (error) {
+    console.error('❌ Test email failed:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to send test email',
+      details: error.message
+    });
+  }
+});
+
+// ================================================================
 // START SERVER - ✅ FIXED TEMPLATE LITERALS
 // ================================================================
 app.listen(PORT, () => {
@@ -595,9 +686,11 @@ app.listen(PORT, () => {
   console.log('🚀 ================================');
   console.log('🚀 FortuneHub Backend Server Started!');
   console.log('🚀 ================================');
-  console.log(`📡 Server running on port ${PORT}`);  // ✅ FIXED
-  console.log(`🌐 Local: http://localhost:${PORT}`); // ✅ FIXED
+  console.log(`📡 Server running on port ${PORT}`);
+  console.log(`🌐 Local: http://localhost:${PORT}`);
   console.log('💾 Database: orders.db');
+  console.log('📧 Email User:', process.env.EMAIL_USER || 'NOT CONFIGURED ❌');
+  console.log('📧 Owner Email:', process.env.OWNER_EMAIL || 'NOT CONFIGURED ❌');
   console.log('✉️  Email notifications: Enabled (Owner + Customer)');
   console.log('📜 Transaction history: Enabled');
   console.log('🚀 ================================');
@@ -614,4 +707,4 @@ process.on('SIGINT', () => {
     else console.log('✅ Database connection closed');
     process.exit(0);
   });
-});
+});    
