@@ -1,7 +1,8 @@
-# FortuneHub Backend Server
-
 node_modules/
 .env
-orders.db
-*.log
 .DS_Store
+*.log
+npm-debug.log*
+.vscode/
+dist/
+build/
