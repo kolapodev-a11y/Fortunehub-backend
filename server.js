@@ -2,7 +2,7 @@
 // FORTUNEHUB E-COMMERCE BACKEND SERVER (RENDER + MONGODB + RESEND)
 // - Orders stored in MongoDB Atlas
 // - Resend for owner + customer emails
-// - Admin endpoints protected with Basic Auth
+// - Product images included in emails
 // ================================================================
 
 require('dotenv').config();
@@ -328,7 +328,7 @@ app.post('/api/verify-payment', requireDb, async (req, res) => {
     const insertResult = await ordersCollection.insertOne(orderData);
     const orderId = insertResult.insertedId;
 
-    // Send emails async (don’t block response)
+    // Send emails async (don't block response)
     sendOrderEmail({
       orderReference: reference,
       customerName,
@@ -358,7 +358,7 @@ app.post('/api/verify-payment', requireDb, async (req, res) => {
 });
 
 // ================================================================
-// EMAIL SENDING (RESEND)
+// EMAIL SENDING (RESEND) - WITH PRODUCT IMAGES
 // ================================================================
 async function sendOrderEmail(orderData) {
   const {
@@ -386,13 +386,23 @@ async function sendOrderEmail(orderData) {
   const whatsappLink = whatsappNumber ? `https://wa.me/${whatsappNumber}` : '#';
 
   const items = Array.isArray(cartItems) ? cartItems : [];
+  
+  // Build cart items HTML with product images
   const cartItemsHtml = items.length
     ? items.map((item) => {
       const name = item?.name || 'Item';
       const qty = Number(item?.quantity || 1);
       const priceKobo = Number(item?.price || 0);
+      const imageUrl = item?.image || item?.imageUrl || '';
+      
+      // Image cell with fallback
+      const imageCell = imageUrl 
+        ? `<img src="${imageUrl}" alt="${name}" style="width: 80px; height: 80px; object-fit: cover; border-radius: 8px; border: 1px solid #e0e0e0;" />`
+        : `<div style="width: 80px; height: 80px; background: #f5f5f5; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #999; font-size: 12px;">No Image</div>`;
+      
       return `
         <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #eee;">${imageCell}</td>
           <td style="padding: 10px; border-bottom: 1px solid #eee;">${name}</td>
           <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: center;">${qty}</td>
           <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">${formatCurrency(priceKobo)}</td>
@@ -402,7 +412,7 @@ async function sendOrderEmail(orderData) {
     }).join('')
     : `
       <tr>
-        <td colspan="4" style="padding: 10px; text-align:center; color:#666;">
+        <td colspan="5" style="padding: 10px; text-align:center; color:#666;">
           (No cart items received)
         </td>
       </tr>
@@ -431,6 +441,7 @@ async function sendOrderEmail(orderData) {
       <table style="width:100%; border-collapse: collapse;">
         <thead>
           <tr style="background:#f5f5f5;">
+            <th style="padding:10px; text-align:left;">Image</th>
             <th style="padding:10px; text-align:left;">Product</th>
             <th style="padding:10px; text-align:center;">Qty</th>
             <th style="padding:10px; text-align:right;">Price</th>
@@ -471,6 +482,7 @@ async function sendOrderEmail(orderData) {
         <table style="width:100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden;">
           <thead>
             <tr style="background:#667eea; color:#fff;">
+              <th style="padding:12px; text-align:left;">Image</th>
               <th style="padding:12px; text-align:left;">Product</th>
               <th style="padding:12px; text-align:center;">Qty</th>
               <th style="padding:12px; text-align:right;">Price</th>
@@ -666,7 +678,7 @@ app.use((req, res) => {
 });
 
 // ================================================================
-// START SERVER
+// START SERVER - FIXED TEMPLATE LITERAL
 // ================================================================
 async function startServer() {
   try {
@@ -676,11 +688,11 @@ async function startServer() {
       console.log('='.repeat(60));
       console.log('✅ FORTUNEHUB BACKEND SERVER STARTED SUCCESSFULLY!');
       console.log('='.repeat(60));
-      console.log(🌐 Server running on port: ${PORT});
-      console.log(🌍 Environment: ${process.env.NODE_ENV || 'development'});
-      console.log(💾 Database: ${db ? 'Connected to MongoDB Atlas' : 'Disconnected'});
-      console.log(📧 Email service: ${resend ? 'Resend Enabled' : 'Resend Disabled'});
-      console.log(💳 Payment: ${PAYSTACK_SECRET_KEY ? 'Paystack Enabled' : 'Paystack Disabled'});
+      console.log(`🌐 Server running on port: ${PORT}`);
+      console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`💾 Database: ${db ? 'Connected to MongoDB Atlas' : 'Disconnected'}`);
+      console.log(`📧 Email service: ${resend ? 'Resend Enabled' : 'Resend Disabled'}`);
+      console.log(`💳 Payment: ${PAYSTACK_SECRET_KEY ? 'Paystack Enabled' : 'Paystack Disabled'}`);
       console.log('='.repeat(60));
     });
   } catch (error) {
