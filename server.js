@@ -503,4 +503,200 @@ async function sendOrderEmail(orderData) {
           </p>
         </div>
 
-        <div style="background
+        <div style="background:#f5f5f5;padding:15px;font-size:12px;color:#666;text-align:center;">
+          Please keep this email for your records.<br>
+          Order Reference: <strong>${orderReference}</strong>
+          <br><br>
+          Need help? Contact us: ${RESEND_FROM_EMAIL}
+        </div>
+      </div>
+    </div>
+  `;
+
+  // ================================================================
+  // 📧 SEND EMAILS WITH RESEND
+  // ================================================================
+  
+  // OWNER EMAIL
+  if (OWNER_EMAIL) {
+    try {
+      await resend.emails.send({
+        from: RESEND_FROM_EMAIL,
+        to: OWNER_EMAIL,
+        subject: `🛒 New Order #${orderReference} - ${customerName}`,
+        html: ownerEmailHtml
+      });
+      console.log('✅ Owner email sent with product images via Resend!');
+    } catch (error) {
+      console.error('❌ Owner email failed:', error.message);
+    }
+  } else {
+    console.warn('⚠️ OWNER_EMAIL not configured, skipping owner notification email.');
+  }
+
+  // CUSTOMER EMAIL
+  if (customerEmail && customerEmail !== 'unknown@email') {
+    try {
+      await resend.emails.send({
+        from: RESEND_FROM_EMAIL,
+        to: customerEmail,
+        subject: `✅ Order Confirmation #${orderReference} - FortuneHub`,
+        html: customerEmailHtml
+      });
+      console.log('✅ Customer email sent with product images via Resend!');
+    } catch (error) {
+      console.error('❌ Customer email failed:', error.message);
+    }
+  } else {
+    console.warn('⚠️ Invalid customer email, skipping customer confirmation.');
+  }
+}
+
+// ================================================================
+// GET ALL ORDERS
+// ================================================================
+app.get('/api/orders', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
+    res.json({ success: true, count: rows.length, orders: rows });
+  } catch (err) {
+    console.error('❌ Database error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch orders' });
+  }
+});
+
+// ================================================================
+// GET SINGLE ORDER BY REFERENCE
+// ================================================================
+app.get('/api/orders/:reference', async (req, res) => {
+  try {
+    const { reference } = req.params;
+    const { rows } = await pool.query(
+      'SELECT * FROM orders WHERE order_reference = $1',
+      [reference]
+    );
+
+    if (!rows[0]) return res.status(404).json({ error: 'Order not found' });
+    res.json({ success: true, order: rows[0] });
+  } catch (err) {
+    console.error('❌ Database error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch order' });
+  }
+});
+
+// ================================================================
+// SEARCH ORDERS BY EMAIL OR REFERENCE
+// ================================================================
+app.post('/api/orders/search', async (req, res) => {
+  const { email, orderReference } = req.body;
+
+  if (!email && !orderReference) {
+    return res.status(400).json({
+      error: 'Please provide either email or order reference'
+    });
+  }
+
+  try {
+    if (orderReference) {
+      const { rows } = await pool.query(
+        'SELECT * FROM orders WHERE order_reference = $1',
+        [orderReference]
+      );
+      return res.json({ success: true, count: rows.length, orders: rows });
+    }
+
+    const { rows } = await pool.query(
+      'SELECT * FROM orders WHERE customer_email = $1 ORDER BY created_at DESC',
+      [email]
+    );
+    res.json({ success: true, count: rows.length, orders: rows });
+  } catch (err) {
+    console.error('❌ Database error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch orders' });
+  }
+});
+
+// ================================================================
+// TEST EMAIL ENDPOINT
+// ================================================================
+app.post('/api/test-email', async (req, res) => {
+  const { testEmail } = req.body;
+
+  if (!testEmail) {
+    return res.status(400).json({ error: 'testEmail is required' });
+  }
+
+  try {
+    if (!resend || !RESEND_FROM_EMAIL) {
+      return res.status(500).json({
+        success: false,
+        error: 'Resend is not configured (missing RESEND_API_KEY or RESEND_FROM_EMAIL)'
+      });
+    }
+
+    const result = await resend.emails.send({
+      from: RESEND_FROM_EMAIL,
+      to: testEmail,
+      subject: '✅ Test Email from FortuneHub Backend (Resend)',
+      html: `
+        <div style="font-family:Arial,sans-serif;padding:20px;">
+          <h1>✅ Resend Working!</h1>
+          <p>This is a test email from your FortuneHub backend server.</p>
+          <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
+        </div>
+      `
+    });
+
+    res.json({
+      success: true,
+      message: 'Test email sent successfully via Resend!',
+      resendResponse: result,
+      recipient: testEmail
+    });
+  } catch (error) {
+    console.error('❌ Test email failed:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to send test email',
+      details: error.message
+    });
+  }
+});
+
+// ================================================================
+// START SERVER
+// ================================================================
+ensureTables()
+  .then(() => {
+    console.log('✅ Postgres tables ready');
+
+    app.listen(PORT, () => {
+      console.log('');
+      console.log('🚀 ================================');
+      console.log('🚀 FortuneHub Backend Server Started!');
+      console.log('🚀 ================================');
+      console.log(`📡 Server running on port ${PORT}`);
+      console.log('🗄️ Database: Postgres (Render)');
+      console.log('✉️  Email: Resend WITH IMAGES ✅');
+      console.log('🚀 ================================');
+      console.log('');
+    });
+  })
+  .catch((err) => {
+    console.error('❌ Failed to init database tables:', err.message);
+    process.exit(1);
+  });
+
+// ================================================================
+// GRACEFUL SHUTDOWN
+// ================================================================
+process.on('SIGINT', async () => {
+  console.log('\n⏳ Shutting down gracefully...');
+  try {
+    await pool.end();
+    console.log('✅ Postgres pool closed');
+  } catch (err) {
+    console.error('❌ Error closing Postgres pool:', err.message);
+  }
+  process.exit(0);
+});
