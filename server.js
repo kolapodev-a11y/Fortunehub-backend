@@ -27,7 +27,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ================================================================
-// MONGODB CONNECTION (Atlas)
+// MONGODB CONNECTION (Atlas) - FIXED VERSION
 // ================================================================
 if (!process.env.MONGODB_URI) {
   console.error('❌ MONGODB_URI is not set. Please configure MongoDB Atlas connection string.');
@@ -41,44 +41,81 @@ let transactionsCollection;
 const mongoClient = new MongoClient(process.env.MONGODB_URI, {
   serverSelectionTimeoutMS: 10000,
   socketTimeoutMS: 45000,
+  connectTimeoutMS: 10000,
   maxPoolSize: 50,
-  minPoolSize: 10,
+  minPoolSize: 5,
   retryWrites: true,
   w: 'majority'
 });
 
 async function connectToDatabase() {
-  try {
-    console.log('🔄 Connecting to MongoDB Atlas...');
-    await mongoClient.connect();
-    console.log('✅ Connected to MongoDB Atlas');
-    
-    db = mongoClient.db('fortunehub');
-    ordersCollection = db.collection('orders');
-    transactionsCollection = db.collection('transactions');
-    
-    // Create indexes for better performance
-    await ordersCollection.createIndex({ order_reference: 1 }, { unique: true });
-    await ordersCollection.createIndex({ customer_email: 1 });
-    await ordersCollection.createIndex({ created_at: -1 });
-    await ordersCollection.createIndex({ payment_status: 1 });
-    
-    await transactionsCollection.createIndex({ userId: 1, createdAt: -1 });
-    await transactionsCollection.createIndex({ reference: 1 }, { unique: true, sparse: true });
-    await transactionsCollection.createIndex({ status: 1 });
-    
-    console.log('✅ Database indexes created');
-    return true;
-  } catch (error) {
-    console.error('❌ MongoDB connection error:', error.message);
-    if (IS_PRODUCTION) {
-      console.log('🔄 Retrying connection in 5 seconds...');
-      setTimeout(connectToDatabase, 5000);
-    } else {
-      process.exit(1);
+  let retries = 0;
+  const maxRetries = 5;
+  
+  while (retries < maxRetries) {
+    try {
+      console.log(`🔄 Connecting to MongoDB Atlas... (Attempt ${retries + 1}/${maxRetries})`);
+      await mongoClient.connect();
+      
+      // Test connection
+      await mongoClient.db('admin').admin().ping();
+      console.log('✅ Connected to MongoDB Atlas successfully!');
+      
+      db = mongoClient.db('fortunehub');
+      ordersCollection = db.collection('orders');
+      transactionsCollection = db.collection('transactions');
+      
+      // Create indexes for better performance
+      await ordersCollection.createIndex({ order_reference: 1 }, { unique: true });
+      await ordersCollection.createIndex({ customer_email: 1 });
+      await ordersCollection.createIndex({ created_at: -1 });
+      await ordersCollection.createIndex({ payment_status: 1 });
+      
+      await transactionsCollection.createIndex({ userId: 1, createdAt: -1 });
+      await transactionsCollection.createIndex({ reference: 1 }, { unique: true, sparse: true });
+      await transactionsCollection.createIndex({ status: 1 });
+      
+      console.log('✅ Database indexes created successfully');
+      return true;
+    } catch (error) {
+      retries++;
+      console.error(`❌ MongoDB connection error (Attempt ${retries}/${maxRetries}):`, error.message);
+      
+      if (retries >= maxRetries) {
+        console.error('❌ Failed to connect after maximum retries');
+        throw error;
+      }
+      
+      console.log(`🔄 Retrying in 5 seconds...`);
+      await new Promise(resolve => setTimeout(resolve, 5000));
     }
   }
 }
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('🛑 Shutting down gracefully...');
+  try {
+    await mongoClient.close();
+    console.log('✅ MongoDB connection closed');
+    process.exit(0);
+  } catch (error) {
+    console.error('❌ Error closing MongoDB connection:', error);
+    process.exit(1);
+  }
+});
+
+process.on('SIGTERM', async () => {
+  console.log('🛑 SIGTERM received, shutting down gracefully...');
+  try {
+    await mongoClient.close();
+    console.log('✅ MongoDB connection closed');
+    process.exit(0);
+  } catch (error) {
+    console.error('❌ Error closing MongoDB connection:', error);
+    process.exit(1);
+  }
+});
 
 // ================================================================
 // RESEND EMAIL SERVICE
@@ -296,6 +333,8 @@ app.post('/api/verify-payment', async (req, res) => {
 
     const insertResult = await ordersCollection.insertOne(orderData);
     const orderId = insertResult.insertedId;
+
+    console.log('✅ Order saved successfully with ID:', orderId);
 
     // Send emails (async)
     sendOrderEmail({
@@ -537,8 +576,7 @@ app.get('/api/orders', async (req, res) => {
         page,
         limit,
         totalPages: Math.ceil(total / limit),
-        hasNext: page < Math.ceil(total / limit),
-        hasPrev: page > 1
+        hasNext: page  1
       },
       orders
     });
@@ -568,40 +606,6 @@ app.get('/api/orders/:reference', async (req, res) => {
 });
 
 // ================================================================
-// SEARCH ORDERS BY EMAIL OR REFERENCE (Public)
-// ================================================================
-app.post('/api/orders/search', async (req, res) => {
-  const { email, orderReference } = req.body;
-
-  if (!email && !orderReference) {
-    return res.status(400).json({
-      error: 'Please provide either email or order reference'
-    });
-  }
-
-  try {
-    if (orderReference) {
-      const order = await ordersCollection.findOne({ order_reference: orderReference });
-      return res.json({
-        success: true,
-        count: order ? 1 : 0,
-        orders: order ? [order] : []
-      });
-    }
-
-    const orders = await ordersCollection
-      .find({ customer_email: email })
-      .sort({ created_at: -1 })
-      .toArray();
-
-    res.json({ success: true, count: orders.length, orders });
-  } catch (error) {
-    console.error('❌ Error searching orders:', error);
-    res.status(500).json({ error: 'Failed to search orders' });
-  }
-});
-
-// ================================================================
 // ADMIN: GET ALL ORDERS (Protected)
 // ================================================================
 app.get('/api/admin/orders', basicAuth, async (req, res) => {
@@ -610,34 +614,36 @@ app.get('/api/admin/orders', basicAuth, async (req, res) => {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
     const skip = (page - 1) * limit;
 
-    const [orders, total, stats] = await Promise.all([
+    const query = {};
+    if (req.query.status) query.payment_status = req.query.status;
+    if (req.query.email) query.customer_email = new RegExp(req.query.email, 'i');
+    if (req.query.search) {
+      query.$or = [
+        { customer_name: new RegExp(req.query.search, 'i') },
+        { customer_email: new RegExp(req.query.search, 'i') },
+        { order_reference: new RegExp(req.query.search, 'i') }
+      ];
+    }
+
+    const [orders, total] = await Promise.all([
       ordersCollection
-        .find({})
+        .find(query)
         .sort({ created_at: -1 })
         .skip(skip)
         .limit(limit)
         .toArray(),
-      ordersCollection.countDocuments({}),
-      ordersCollection.aggregate([
-        {
-          $group: {
-            _id: '$payment_status',
-            count: { $sum: 1 },
-            totalAmount: { $sum: '$total_amount' }
-          }
-        }
-      ]).toArray()
+      ordersCollection.countDocuments(query)
     ]);
 
     res.json({
       success: true,
       count: orders.length,
       total,
-      stats,
       pagination: {
         page,
         limit,
-        totalPages: Math.ceil(total / limit)
+        totalPages: Math.ceil(total / limit),
+        hasNext: page  1
       },
       orders
     });
@@ -652,41 +658,31 @@ app.get('/api/admin/orders', basicAuth, async (req, res) => {
 // ================================================================
 app.get('/api/admin/stats', basicAuth, async (req, res) => {
   try {
-    const [statusStats, recentStats] = await Promise.all([
+    const [
+      totalOrders,
+      successfulOrders,
+      totalRevenue,
+      todayOrders
+    ] = await Promise.all([
+      ordersCollection.countDocuments(),
+      ordersCollection.countDocuments({ payment_status: 'success' }),
       ordersCollection.aggregate([
-        {
-          $group: {
-            _id: '$payment_status',
-            count: { $sum: 1 },
-            totalAmount: { $sum: '$total_amount' }
-          }
-        }
+        { $match: { payment_status: 'success' } },
+        { $group: { _id: null, total: { $sum: '$total_amount' } } }
       ]).toArray(),
-      
-      ordersCollection.aggregate([
-        { 
-          $match: { 
-            created_at: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
-          } 
-        },
-        {
-          $group: {
-            _id: null,
-            count: { $sum: 1 },
-            totalAmount: { $sum: '$total_amount' }
-          }
-        }
-      ]).toArray()
+      ordersCollection.countDocuments({
+        created_at: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) }
+      })
     ]);
-
-    const totalOrders = await ordersCollection.countDocuments({});
 
     res.json({
       success: true,
-      data: {
+      stats: {
         totalOrders,
-        byStatus: statusStats,
-        last24Hours: recentStats[0] || { count: 0, totalAmount: 0 }
+        successfulOrders,
+        totalRevenue: totalRevenue[0]?.total || 0,
+        todayOrders,
+        revenueFormatted: formatCurrency(totalRevenue[0]?.total || 0)
       }
     });
   } catch (error) {
@@ -696,205 +692,59 @@ app.get('/api/admin/stats', basicAuth, async (req, res) => {
 });
 
 // ================================================================
-// TRANSACTION ROUTES (From your original MongoDB code)
+// ADMIN: DELETE ORDER (Protected)
 // ================================================================
-
-// Create Transaction
-app.post('/api/transactions', async (req, res) => {
+app.delete('/api/admin/orders/:id', basicAuth, async (req, res) => {
   try {
-    const { userId, amount, type, status, description, metadata } = req.body;
-
-    if (!userId || !amount || !type) {
-      return res.status(400).json({ error: 'userId, amount, and type are required' });
-    }
-
-    const transaction = {
-      userId,
-      amount: parseFloat(amount),
-      type,
-      status: status || 'pending',
-      description: description || '',
-      reference: generateReference(),
-      metadata: metadata || {},
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      deleted: false
-    };
-
-    const result = await transactionsCollection.insertOne(transaction);
-
-    res.status(201).json({
-      success: true,
-      message: 'Transaction created successfully',
-      data: {
-        transactionId: result.insertedId,
-        reference: transaction.reference,
-        ...transaction
-      }
-    });
-  } catch (error) {
-    console.error('❌ Error creating transaction:', error);
-    res.status(500).json({ error: 'Failed to create transaction' });
-  }
-});
-
-// Get All Transactions (with pagination)
-app.get('/api/transactions', async (req, res) => {
-  try {
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
-    const skip = (page - 1) * limit;
-
-    const query = { deleted: { $ne: true } };
-    if (req.query.userId) query.userId = req.query.userId;
-    if (req.query.type) query.type = req.query.type;
-    if (req.query.status) query.status = req.query.status;
-
-    const [transactions, total] = await Promise.all([
-      transactionsCollection
-        .find(query)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .toArray(),
-      transactionsCollection.countDocuments(query)
-    ]);
-
-    res.json({
-      success: true,
-      data: transactions,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit)
-      }
-    });
-  } catch (error) {
-    console.error('❌ Error fetching transactions:', error);
-    res.status(500).json({ error: 'Failed to fetch transactions' });
-  }
-});
-
-// Get Single Transaction
-app.get('/api/transactions/:id', async (req, res) => {
-  try {
-    if (!ObjectId.isValid(req.params.id)) {
-      return res.status(400).json({ error: 'Invalid transaction ID' });
-    }
-
-    const transaction = await transactionsCollection.findOne({
-      _id: new ObjectId(req.params.id),
-      deleted: { $ne: true }
-    });
-
-    if (!transaction) {
-      return res.status(404).json({ error: 'Transaction not found' });
-    }
-
-    res.json({ success: true, data: transaction });
-  } catch (error) {
-    console.error('❌ Error fetching transaction:', error);
-    res.status(500).json({ error: 'Failed to fetch transaction' });
-  }
-});
-
-// Update Transaction
-app.patch('/api/transactions/:id', async (req, res) => {
-  try {
-    if (!ObjectId.isValid(req.params.id)) {
-      return res.status(400).json({ error: 'Invalid transaction ID' });
-    }
-
-    const updateData = { updatedAt: new Date() };
-    const allowedFields = ['status', 'metadata', 'description'];
+    const { id } = req.params;
     
-    allowedFields.forEach(field => {
-      if (req.body[field] !== undefined) {
-        updateData[field] = req.body[field];
-      }
-    });
-
-    const result = await transactionsCollection.updateOne(
-      { _id: new ObjectId(req.params.id), deleted: { $ne: true } },
-      { $set: updateData }
-    );
-
-    if (result.matchedCount === 0) {
-      return res.status(404).json({ error: 'Transaction not found' });
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid order ID' });
     }
 
-    res.json({
-      success: true,
-      message: 'Transaction updated successfully'
-    });
+    const result = await ordersCollection.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    res.json({ success: true, message: 'Order deleted successfully' });
   } catch (error) {
-    console.error('❌ Error updating transaction:', error);
-    res.status(500).json({ error: 'Failed to update transaction' });
+    console.error('❌ Error deleting order:', error);
+    res.status(500).json({ error: 'Failed to delete order' });
   }
 });
 
 // ================================================================
-// TEST EMAIL ENDPOINT
-// ================================================================
-app.post('/api/test-email', async (req, res) => {
-  const { testEmail } = req.body;
-
-  if (!testEmail) {
-    return res.status(400).json({ error: 'testEmail is required' });
-  }
-
-  try {
-    if (!resend || !RESEND_FROM_EMAIL) {
-      return res.status(500).json({
-        success: false,
-        error: 'Resend is not configured (missing RESEND_API_KEY or RESEND_FROM_EMAIL)'
-      });
-    }
-
-    const result = await resend.emails.send({
-      from: RESEND_FROM_EMAIL,
-      to: testEmail,
-      subject: '✅ Test Email from FortuneHub Backend (Resend)',
-      html: `
-        <div style="font-family: Arial; padding: 20px;">
-          <h2>✅ Resend Working!</h2>
-          <p>This is a test email from your FortuneHub backend server.</p>
-          <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
-          <p style="color: #25D366;">Your email service is configured correctly! 🎉</p>
-        </div>
-      `
-    });
-
-    res.json({
-      success: true,
-      message: 'Test email sent successfully via Resend!',
-      emailId: result.id,
-      recipient: testEmail
-    });
-  } catch (error) {
-    console.error('❌ Test email failed:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to send test email',
-      details: error.message
-    });
-  }
-});
-
-// ================================================================
-// ERROR HANDLING
+// 404 HANDLER
 // ================================================================
 app.use((req, res) => {
   res.status(404).json({
-    error: 'Route not found',
+    error: 'Endpoint not found',
     path: req.path,
-    method: req.method
+    method: req.method,
+    availableEndpoints: {
+      public: [
+        'GET /',
+        'GET /health',
+        'POST /api/verify-payment',
+        'GET /api/orders',
+        'GET /api/orders/:reference'
+      ],
+      admin: [
+        'GET /api/admin/orders',
+        'GET /api/admin/stats',
+        'DELETE /api/admin/orders/:id'
+      ]
+    }
   });
 });
 
+// ================================================================
+// ERROR HANDLER
+// ================================================================
 app.use((err, req, res, next) => {
-  console.error('❌ Server error:', err);
+  console.error('❌ Unhandled error:', err);
   res.status(500).json({
     error: 'Internal server error',
     message: IS_PRODUCTION ? 'Something went wrong' : err.message
@@ -902,66 +752,43 @@ app.use((err, req, res, next) => {
 });
 
 // ================================================================
-// START SERVER
+// START SERVER (Wait for database connection first)
 // ================================================================
 async function startServer() {
   try {
+    // Connect to database first
     await connectToDatabase();
     
+    // Then start HTTP server
     app.listen(PORT, '0.0.0.0', () => {
-      console.log('');
-      console.log('🚀 ================================');
-      console.log('🚀 FortuneHub Backend Server Started!');
-      console.log('🚀 ================================');
-      console.log(`📡 Port: ${PORT}`);
-      console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`🗄️  Database: MongoDB Atlas - ${db ? '✅ Connected' : '❌ Disconnected'}`);
-      console.log(`✉️  Email: Resend - ${resend ? '✅ Configured' : '⚠️ Not Configured'}`);
-      console.log(`💳 Payment: Paystack - ${PAYSTACK_SECRET_KEY ? '✅ Configured' : '⚠️ Not Configured'}`);
-      console.log(`🌐 Health: http://localhost:${PORT}/health`);
-      console.log('🚀 ================================');
-      console.log('');
+      console.log('='.repeat(60));
+      console.log('✅ FORTUNEHUB BACKEND SERVER STARTED SUCCESSFULLY!');
+      console.log('='.repeat(60));
+      console.log(🌐 Server running on port: ${PORT});
+      console.log(🌍 Environment: ${process.env.NODE_ENV || 'development'});
+      console.log(💾 Database: ${db ? 'Connected to MongoDB Atlas' : 'Disconnected'});
+      console.log(📧 Email service: ${resend ? 'Resend Enabled' : 'Resend Disabled'});
+      console.log(💳 Payment: ${PAYSTACK_SECRET_KEY ? 'Paystack Enabled' : 'Paystack Disabled'});
+      console.log('='.repeat(60));
+      console.log('\n📋 Available Endpoints:');
+      console.log('   PUBLIC:');
+      console.log('   - GET  /');
+      console.log('   - GET  /health');
+      console.log('   - POST /api/verify-payment');
+      console.log('   - GET  /api/orders');
+      console.log('   - GET  /api/orders/:reference');
+      console.log('\n   ADMIN (Basic Auth Required):');
+      console.log('   - GET    /api/admin/orders');
+      console.log('   - GET    /api/admin/stats');
+      console.log('   - DELETE /api/admin/orders/:id');
+      console.log('='.repeat(60));
     });
   } catch (error) {
-    console.error('❌ Failed to start server:', error);
+    console.error('❌ Failed to start server:', error.message);
+    console.error('Stack trace:', error.stack);
     process.exit(1);
   }
 }
-
-// ================================================================
-// GRACEFUL SHUTDOWN
-// ================================================================
-async function gracefulShutdown(signal) {
-  console.log(`\n${signal} received: Starting graceful shutdown...`);
-  
-  try {
-    if (mongoClient) {
-      await mongoClient.close();
-      console.log('✅ MongoDB connection closed');
-    }
-    
-    console.log('✅ Graceful shutdown completed');
-    process.exit(0);
-  } catch (error) {
-    console.error('❌ Error during shutdown:', error);
-    process.exit(1);
-  }
-}
-
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-process.on('uncaughtException', (error) => {
-  console.error('❌ Uncaught Exception:', error);
-  gracefulShutdown('UNCAUGHT_EXCEPTION');
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-});
 
 // Start the server
-startServer().catch(error => {
-  console.error('❌ Fatal error during startup:', error);
-  process.exit(1);
-});
+startServer();
