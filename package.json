@@ -1,7 +1,7 @@
 {
   "name": "fortunehub-backend",
   "version": "1.0.0",
-  "description": "FortuneHub E-commerce Backend - Render + Postgres + SendGrid",
+  "description": "FortuneHub E-commerce Backend - Render + Postgres + Resend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -12,7 +12,7 @@
     "ecommerce",
     "paystack",
     "postgres",
-    "sendgrid"
+    "resend"
   ],
   "author": "kolapodev-a11y",
   "license": "ISC",
@@ -21,7 +21,7 @@
     "cors": "^2.8.5",
     "axios": "^1.7.0",
     "pg": "^8.11.3",
-    "@sendgrid/mail": "^7.7.0",
+    "resend": "^4.0.1",
     "dotenv": "^16.4.5"
   },
   "devDependencies": {
