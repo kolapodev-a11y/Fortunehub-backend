@@ -1,703 +1,360 @@
-// ================================================================
-// FORTUNEHUB E-COMMERCE BACKEND SERVER (RENDER + POSTGRES + RESEND)
-// - Orders stored in Postgres (JSONB products + JSONB cart_items)
-// - Resend for owner + customer emails WITH PRODUCT IMAGES
-// ================================================================
-
 const express = require('express');
+const mongoose = require('mongoose');
 const cors = require('cors');
-const axios = require('axios');
-const { Pool } = require('pg');
 const { Resend } = require('resend');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// ================================================================
-// MIDDLEWARE
-// ================================================================
+// Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ================================================================
-// POSTGRES (Render)
-// ================================================================
-if (!process.env.DATABASE_URL) {
-  console.warn('⚠️ DATABASE_URL is not set. On Render, attach a Postgres DB and use its DATABASE_URL.');
-}
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
-
-async function ensureTables() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS orders (
-      id SERIAL PRIMARY KEY,
-      order_reference TEXT UNIQUE NOT NULL,
-      customer_name TEXT NOT NULL,
-      customer_email TEXT NOT NULL,
-      customer_phone TEXT NOT NULL,
-      shipping_state TEXT NOT NULL,
-
-      shipping_fee INTEGER NOT NULL,          -- NAIRA
-      subtotal BIGINT NOT NULL,               -- KOBO
-      total_amount BIGINT NOT NULL,           -- KOBO
-
-      products JSONB NOT NULL,                -- ✅ JSON products with images
-      cart_items JSONB NOT NULL,              -- ✅ JSON cart items with images
-
-      payment_status TEXT DEFAULT 'pending',
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-  `);
-}
-
-// ================================================================
-// RESEND EMAIL SERVICE
-// ================================================================
-if (!process.env.RESEND_API_KEY) {
-  console.warn('⚠️ RESEND_API_KEY is not set. Emails will fail until configured.');
-}
-
+// Initialize Resend
 const resend = new Resend(process.env.RESEND_API_KEY);
-const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
-const OWNER_EMAIL = process.env.OWNER_EMAIL;
 
-// ================================================================
-// PAYSTACK
-// ================================================================
-const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+// MongoDB Connection
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log('✅ MongoDB Connected Successfully'))
+.catch((err) => console.error('❌ MongoDB Connection Error:', err));
 
-// ================================================================
-// HEALTHCHECK
-// ================================================================
-app.get('/', (req, res) => {
-  res.json({
-    message: '🚀 FortuneHub Backend Server is Running!',
-    status: 'active',
-    timestamp: new Date().toISOString(),
-    postgresConfigured: !!process.env.DATABASE_URL,
-    resendConfigured: !!process.env.RESEND_API_KEY && !!RESEND_FROM_EMAIL,
-    ownerEmailConfigured: !!OWNER_EMAIL,
-    emailService: 'Resend'
-  });
+// Order Schema
+const orderSchema = new mongoose.Schema({
+  customerName: { type: String, required: true },
+  email: { type: String, required: true },
+  phone: { type: String, required: true },
+  address: { type: String, required: true },
+  products: [{
+    productId: String,
+    name: String,
+    price: Number,
+    quantity: Number
+  }],
+  totalAmount: { type: Number, required: true },
+  status: { type: String, default: 'pending' },
+  createdAt: { type: Date, default: Date.now }
 });
 
-// ================================================================
-// HELPERS
-// ================================================================
-function formatCurrency(amountInKobo) {
-  return `₦${(Number(amountInKobo) / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })}`;
-}
+const Order = mongoose.model('Order', orderSchema);
 
-function normalizeProducts(metadata) {
-  const p = metadata?.products ?? metadata?.product_names ?? metadata?.product ?? null;
-
-  if (Array.isArray(p)) return p;
-
-  if (p && typeof p === 'object') return [p];
-
-  if (typeof p === 'string' && p.trim()) {
-    return p.split(',').map(x => ({ name: x.trim() })).filter(x => x.name);
-  }
-
-  return [];
-}
-
-function normalizeCartItems(metadata) {
-  const c = metadata?.cart_items ?? null;
-  if (Array.isArray(c)) return c;
-  if (c && typeof c === 'object') return [c];
-  return [];
-}
-
-// ================================================================
-// PAYMENT VERIFICATION ENDPOINT
-// ================================================================
-app.post('/api/verify-payment', async (req, res) => {
-  console.log('📨 Payment verification request received');
-
-  try {
-    const { reference } = req.body;
-
-    if (!reference) {
-      return res.status(400).json({ error: 'Payment reference is required' });
-    }
-
-    if (!PAYSTACK_SECRET_KEY) {
-      return res.status(500).json({ error: 'PAYSTACK_SECRET_KEY is not configured' });
-    }
-
-    console.log('🔍 Verifying payment reference:', reference);
-
-    const paystackResponse = await axios.get(
-      `https://api.paystack.co/transaction/verify/${reference}`,
-      { headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` } }
-    );
-
-    const paymentData = paystackResponse.data?.data;
-
-    if (!paymentData) {
-      return res.status(500).json({ error: 'Invalid Paystack response (no data)' });
-    }
-
-    if (paymentData.status !== 'success') {
-      return res.status(400).json({
-        error: 'Payment verification failed',
-        status: paymentData.status
-      });
-    }
-
-    // ============================================================
-    // METADATA EXTRACTION (supports direct keys + custom_fields)
-    // ============================================================
-    const metadata = paymentData.metadata || {};
-    const customFields = Array.isArray(metadata.custom_fields) ? metadata.custom_fields : [];
-
-    const getCustomField = (key) => {
-      const f = customFields.find(x => x?.variable_name === key || x?.display_name === key);
-      return f?.value;
-    };
-
-    const customerName =
-      metadata.customer_name || getCustomField('customer_name') || 'Unknown Customer';
-
-    const customerEmail =
-      metadata.customer_email ||
-      getCustomField('customer_email') ||
-      paymentData.customer?.email ||
-      'unknown@email';
-
-    const customerPhone =
-      metadata.customer_phone || getCustomField('customer_phone') || 'N/A';
-
-    const shippingState =
-      metadata.shipping_state || getCustomField('shipping_state') || 'Unknown';
-
-    const shippingFee =
-      (metadata.shipping_fee ?? getCustomField('shipping_fee') ?? 0);
-
-    const shippingFeeNaira = parseInt(shippingFee, 10) || 0;
-    const shippingFeeKobo = shippingFeeNaira * 100;
-
-    const totalAmount = Number(paymentData.amount || 0); // KOBO
-    const subtotal = totalAmount - shippingFeeKobo;
-
-    // ✅ Extract products and cart_items WITH IMAGES
-    const products =
-      normalizeProducts(metadata) ||
-      normalizeProducts({ products: getCustomField('products') }) ||
-      [];
-
-    const cartItems =
-      normalizeCartItems(metadata) ||
-      normalizeCartItems({ cart_items: getCustomField('cart_items') }) ||
-      [];
-
-    console.log('💾 Saving order to Postgres...');
-    console.log('📧 Customer Email extracted:', customerEmail);
-    console.log('🖼️ Products with images:', products.length);
-    console.log('🛒 Cart items with images:', cartItems.length);
-
-    const insertResult = await pool.query(
-      `
-        INSERT INTO orders (
-          order_reference, customer_name, customer_email, customer_phone,
-          shipping_state, shipping_fee, subtotal, total_amount,
-          products, cart_items, payment_status
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-        RETURNING id
-      `,
-      [
-        reference,
-        customerName,
-        customerEmail,
-        customerPhone,
-        shippingState,
-        shippingFeeNaira,
-        subtotal,
-        totalAmount,
-        JSON.stringify(products),
-        JSON.stringify(cartItems),
-        'success'
-      ]
-    );
-
-    const orderId = insertResult.rows[0]?.id;
-
-    // Send emails (async but awaited to report errors clearly)
-    sendOrderEmail({
-      orderReference: reference,
-      customerName,
-      customerEmail,
-      customerPhone,
-      shippingState,
-      shippingFee: shippingFeeNaira, // NAIRA
-      subtotal, // KOBO
-      totalAmount, // KOBO
-      products,
-      cartItems
-    }).catch(err => {
-      console.error('❌ Email send failed:', err?.message || err);
-    });
-
-    res.json({
-      message: 'Payment verified and order saved successfully! Emails are being sent.',
-      reference,
-      orderId
-    });
-  } catch (error) {
-    console.error('❌ Verification error:', error?.response?.data || error.message);
-    res.status(500).json({
-      error: 'Payment verification failed',
-      details: error?.response?.data || error.message
-    });
-  }
-});
-
-// ================================================================
-// EMAIL SENDING (RESEND) - WITH PRODUCT IMAGES ✅
-// ================================================================
-async function sendOrderEmail(orderData) {
-  const {
-    orderReference,
-    customerName,
-    customerEmail,
-    customerPhone,
-    shippingState,
-    shippingFee,  // NAIRA
-    subtotal,     // KOBO
-    totalAmount,  // KOBO
-    products,
-    cartItems
-  } = orderData;
-
-  if (!process.env.RESEND_API_KEY) {
-    console.warn('⚠️ Resend not configured. Skipping email sending.');
-    return;
-  }
-
-  const cleanPhone = String(customerPhone || '').trim();
-  const whatsappNumber = cleanPhone && cleanPhone !== 'N/A'
-    ? cleanPhone.replace(/^0/, '234').replace(/[^\d]/g, '')
-    : '';
-
-  const whatsappLink = whatsappNumber ? `https://wa.me/${whatsappNumber}` : '#';
-
-  // ✅ Render cart items table rows WITH IMAGES
-  const items = Array.isArray(cartItems) ? cartItems : [];
-  const cartItemsHtml = items.length
-    ? items.map((item) => {
-        const name = item?.name || 'Item';
-        const qty = Number(item?.quantity || 1);
-        const priceKobo = Number(item?.price || 0);
-        const imageUrl = item?.image || item?.imageUrl || item?.img || '';
-        
-        // ✅ Image cell with fallback placeholder
-        const imageCell = imageUrl 
-          ? `<img src="${imageUrl}" alt="${name}" style="width: 60px; height: 60px; object-fit: cover; border-radius: 4px; border: 1px solid #e5e7eb;" />`
-          : `<div style="width: 60px; height: 60px; background: #f3f4f6; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #9ca3af; border: 1px solid #e5e7eb;">No Image</div>`;
-        
-        return `
-          <tr>
-            <td style="padding: 12px; border-bottom: 1px solid #e5e7eb;">${imageCell}</td>
-            <td style="padding: 12px; border-bottom: 1px solid #e5e7eb;">${name}</td>
-            <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; text-align: center;">${qty}</td>
-            <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; text-align: right;">${formatCurrency(priceKobo)}</td>
-            <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; text-align: right; font-weight: 600;">${formatCurrency(priceKobo * qty)}</td>
-          </tr>
-        `;
-      }).join('')
-    : `
-      <tr>
-        <td colspan="5" style="padding: 20px; text-align:center; color:#6b7280;">
-          (No cart items received)
-        </td>
-      </tr>
-    `;
-
-  // ✅ Products summary with images (JSON)
-  const productsList = Array.isArray(products) && products.length
-    ? `
-      <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-top: 15px;">
-        ${products.map(p => {
-          const pName = p?.name || JSON.stringify(p);
-          const pImage = p?.image || p?.imageUrl || p?.img || '';
-          const pQty = p?.quantity || 1;
-          return `
-            <div style="border: 1px solid #e5e7eb; padding: 12px; border-radius: 8px; width: 160px; background: white;">
-              ${pImage 
-                ? `<img src="${pImage}" alt="${pName}" style="width: 100%; height: 140px; object-fit: cover; border-radius: 6px; margin-bottom: 10px;" />`
-                : `<div style="width: 100%; height: 140px; background: #f3f4f6; border-radius: 6px; display: flex; align-items: center; justify-content: center; margin-bottom: 10px; font-size: 12px; color: #9ca3af;">No Image</div>`
-              }
-              <p style="margin: 0; font-size: 14px; text-align: center; font-weight: 500;">${pName}</p>
-              <p style="margin: 5px 0 0 0; font-size: 12px; text-align: center; color: #6b7280;">Qty: ${pQty}</p>
-            </div>
-          `;
-        }).join('')}
-      </div>
-    `
-    : `<p style="color:#6b7280;">No products field provided.</p>`;
-
-  // ================================================================
-  // 👤 OWNER EMAIL HTML (WITH IMAGES)
-  // ================================================================
-  const ownerEmailHtml = `
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color:#1f2937; max-width: 800px; margin: 0 auto; background: #f9fafb;">
-      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px 20px; border-radius: 12px 12px 0 0;">
-        <h2 style="margin: 0; font-size: 28px; font-weight: 700;">🎉 New Order Received!</h2>
-        <p style="margin: 10px 0 0 0; opacity: 0.9; font-size: 14px;">FortuneHub E-commerce Platform</p>
-      </div>
-      
-      <div style="padding: 30px 20px; background: white; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 12px 12px;">
-        <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 6px; margin-bottom: 25px;">
-          <p style="margin: 0; font-weight: 600;"><strong>Order Reference:</strong> <span style="color: #d97706;">${orderReference}</span></p>
-          <p style="margin: 8px 0 0 0;"><strong>Date:</strong> ${new Date().toLocaleString('en-NG')}</p>
+// Helper function to generate responsive email HTML
+function generateEmailHTML(order, isOwner = false) {
+  const productRows = order.products.map(product => `
+    <tr>
+      <td style="padding: 15px; border-bottom: 1px solid #eee;">
+        <div style="display: flex; align-items: center;">
+          <img 
+            src="https://fortunehub-backend.onrender.com/images/${product.productId}.jpg" 
+            alt="${product.name}"
+            style="width: 80px; height: 80px; object-fit: cover; border-radius: 8px; margin-right: 15px;"
+            onerror="this.src='https://via.placeholder.com/80x80?text=Product'"
+          />
+          <div>
+            <strong style="display: block; margin-bottom: 5px;">${product.name}</strong>
+            <span style="color: #666; font-size: 14px;">Qty: ${product.quantity}</span>
+          </div>
         </div>
+      </td>
+      <td style="padding: 15px; border-bottom: 1px solid #eee; text-align: right;">
+        <strong>₦${(product.price * product.quantity).toLocaleString()}</strong>
+      </td>
+    </tr>
+  `).join('');
 
-        <h3 style="border-bottom: 3px solid #667eea; padding-bottom: 10px; color: #667eea; margin-top: 0;">👤 Customer Information</h3>
-        <table style="width: 100%; margin-bottom: 25px;">
+  const emailTitle = isOwner ? 'New Order Received!' : 'Order Confirmation';
+  const emailMessage = isOwner 
+    ? `You have received a new order from ${order.customerName}`
+    : `Thank you for your order, ${order.customerName}!`;
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${emailTitle}</title>
+  <style>
+    /* Reset styles */
+    body, table, td, div, p, a { 
+      margin: 0; 
+      padding: 0; 
+      font-family: Arial, sans-serif; 
+    }
+    
+    /* Mobile-first responsive styles */
+    @media only screen and (max-width: 600px) {
+      .container {
+        width: 100% !important;
+        padding: 10px !important;
+      }
+      .header {
+        font-size: 20px !important;
+        padding: 20px 10px !important;
+      }
+      .content {
+        padding: 15px !important;
+      }
+      .product-image {
+        width: 60px !important;
+        height: 60px !important;
+      }
+      .product-info {
+        font-size: 13px !important;
+      }
+      .total-row {
+        font-size: 16px !important;
+      }
+    }
+  </style>
+</head>
+<body style="background-color: #f4f4f4; padding: 20px;">
+  <div class="container" style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+    
+    <!-- Header -->
+    <div class="header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px 20px; text-align: center;">
+      <h1 style="margin: 0; font-size: 24px;">${emailTitle}</h1>
+      <p style="margin: 10px 0 0 0; opacity: 0.9;">${emailMessage}</p>
+    </div>
+
+    <!-- Content -->
+    <div class="content" style="padding: 30px 20px;">
+      
+      <!-- Order Details -->
+      <div style="margin-bottom: 25px;">
+        <h2 style="color: #333; font-size: 18px; margin-bottom: 15px; border-bottom: 2px solid #667eea; padding-bottom: 10px;">
+          Order Details
+        </h2>
+        <table style="width: 100%; border-collapse: collapse;">
           <tr>
-            <td style="padding: 8px 0; font-weight: 600; width: 140px;">Name:</td>
-            <td style="padding: 8px 0;">${customerName}</td>
+            <td style="padding: 8px 0; color: #666;">Order ID:</td>
+            <td style="padding: 8px 0; text-align: right; font-weight: bold;">#${order._id.toString().substr(-8).toUpperCase()}</td>
           </tr>
           <tr>
-            <td style="padding: 8px 0; font-weight: 600;">Email:</td>
-            <td style="padding: 8px 0;"><a href="mailto:${customerEmail}" style="color: #667eea; text-decoration: none;">${customerEmail}</a></td>
-          </tr>
-          <tr>
-            <td style="padding: 8px 0; font-weight: 600;">Phone:</td>
-            <td style="padding: 8px 0;">${customerPhone}</td>
-          </tr>
-          <tr>
-            <td style="padding: 8px 0; font-weight: 600;">Shipping State:</td>
-            <td style="padding: 8px 0;">${shippingState}</td>
+            <td style="padding: 8px 0; color: #666;">Date:</td>
+            <td style="padding: 8px 0; text-align: right;">${new Date(order.createdAt).toLocaleDateString('en-US', { 
+              year: 'numeric', 
+              month: 'long', 
+              day: 'numeric' 
+            })}</td>
           </tr>
         </table>
-
-        <h3 style="border-bottom: 3px solid #667eea; padding-bottom: 10px; color: #667eea;">🧾 Products Overview</h3>
-        ${productsList}
-
-        <h3 style="border-bottom: 3px solid #667eea; padding-bottom: 10px; color: #667eea; margin-top: 35px;">🛍️ Cart Items Detail</h3>
-        <div style="overflow-x: auto;">
-          <table style="width:100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-            <thead>
-              <tr style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
-                <th style="padding:14px; text-align:left; font-weight: 600;">Image</th>
-                <th style="padding:14px; text-align:left; font-weight: 600;">Product</th>
-                <th style="padding:14px; text-align:center; font-weight: 600;">Qty</th>
-                <th style="padding:14px; text-align:right; font-weight: 600;">Price</th>
-                <th style="padding:14px; text-align:right; font-weight: 600;">Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${cartItemsHtml}
-            </tbody>
-          </table>
-        </div>
-
-        <div style="margin-top: 30px; padding: 25px; background: linear-gradient(to right, #f9fafb, #f3f4f6); border-radius: 10px; border: 1px solid #e5e7eb;">
-          <table style="width: 100%;">
-            <tr>
-              <td style="padding: 8px 0; font-size: 16px;"><strong>Subtotal:</strong></td>
-              <td style="padding: 8px 0; text-align: right; font-size: 16px;">${formatCurrency(subtotal)}</td>
-            </tr>
-            <tr>
-              <td style="padding: 8px 0; font-size: 16px;"><strong>Shipping Fee (${shippingState}):</strong></td>
-              <td style="padding: 8px 0; text-align: right; font-size: 16px;">₦${Number(shippingFee).toLocaleString('en-NG', { minimumFractionDigits: 2 })}</td>
-            </tr>
-            <tr style="border-top: 2px solid #667eea;">
-              <td style="padding: 15px 0 0 0; font-size: 22px; font-weight: 700; color: #667eea;">TOTAL PAID:</td>
-              <td style="padding: 15px 0 0 0; text-align: right; font-size: 22px; font-weight: 700; color: #667eea;">${formatCurrency(totalAmount)}</td>
-            </tr>
-          </table>
-        </div>
-
-        <div style="margin-top: 25px; text-align: center;">
-          <a href="${whatsappLink}" style="display:inline-block; padding:16px 32px; background:#25D366; color:#fff; text-decoration:none; border-radius:10px; font-weight: 600; font-size: 16px; box-shadow: 0 4px 6px rgba(37, 211, 102, 0.3);">
-            💬 Contact Customer via WhatsApp
-          </a>
-        </div>
-
-        <div style="margin-top: 30px; padding: 15px; background: #eff6ff; border-left: 4px solid #3b82f6; border-radius: 6px;">
-          <p style="margin: 0; font-size: 13px; color: #1e40af;">
-            <strong>📌 Action Required:</strong> Process this order and contact the customer to confirm delivery details.
-          </p>
-        </div>
       </div>
-    </div>
-  `;
 
-  // ================================================================
-  // 🛒 CUSTOMER EMAIL HTML (WITH IMAGES)
-  // ================================================================
-  const customerEmailHtml = `
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color:#1f2937; max-width: 800px; margin: 0 auto; background: #f9fafb;">
-      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px 20px; border-radius: 12px 12px 0 0;">
-        <h2 style="margin: 0; font-size: 28px; font-weight: 700;">✅ Thank You for Your Order!</h2>
-        <p style="margin: 10px 0 0 0; opacity: 0.9; font-size: 14px;">FortuneHub - Your purchase is confirmed</p>
+      <!-- Customer Information -->
+      <div style="margin-bottom: 25px;">
+        <h2 style="color: #333; font-size: 18px; margin-bottom: 15px; border-bottom: 2px solid #667eea; padding-bottom: 10px;">
+          ${isOwner ? 'Customer Information' : 'Your Information'}
+        </h2>
+        <table style="width: 100%; border-collapse: collapse;">
+          <tr>
+            <td style="padding: 8px 0; color: #666;">Name:</td>
+            <td style="padding: 8px 0; text-align: right;">${order.customerName}</td>
+          </tr>
+          <tr>
+            <td style="padding: 8px 0; color: #666;">Email:</td>
+            <td style="padding: 8px 0; text-align: right;">${order.email}</td>
+          </tr>
+          <tr>
+            <td style="padding: 8px 0; color: #666;">Phone:</td>
+            <td style="padding: 8px 0; text-align: right;">${order.phone}</td>
+          </tr>
+          <tr>
+            <td style="padding: 8px 0; color: #666; vertical-align: top;">Address:</td>
+            <td style="padding: 8px 0; text-align: right;">${order.address}</td>
+          </tr>
+        </table>
       </div>
-      
-      <div style="padding: 30px 20px; background: white; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 12px 12px;">
-        <div style="background: #d1fae5; border-left: 4px solid #10b981; padding: 15px; border-radius: 6px; margin-bottom: 25px;">
-          <p style="margin: 0; font-size: 16px; font-weight: 600; color: #047857;">
-            🎉 Your payment was successful and your order is being processed!
-          </p>
-        </div>
 
-        <div style="background: #fef3c7; padding: 20px; border-radius: 10px; margin: 20px 0; border: 1px solid #fbbf24;">
-          <p style="margin: 0; font-weight: 600;"><strong>Order Reference:</strong></p>
-          <p style="margin: 8px 0; font-size: 24px; color: #d97706; font-weight: 700; letter-spacing: 1px;">${orderReference}</p>
-          <p style="margin: 10px 0 0 0; font-size: 13px; color: #92400e;"><strong>Date:</strong> ${new Date().toLocaleString('en-NG')}</p>
-        </div>
+      <!-- Products Table -->
+      <div style="margin-bottom: 25px;">
+        <h2 style="color: #333; font-size: 18px; margin-bottom: 15px; border-bottom: 2px solid #667eea; padding-bottom: 10px;">
+          Products Ordered
+        </h2>
+        <table style="width: 100%; border-collapse: collapse; border: 1px solid #eee;">
+          ${productRows}
+          <tr class="total-row" style="background-color: #f9f9f9;">
+            <td style="padding: 20px 15px; font-size: 18px; font-weight: bold;">
+              Total Amount:
+            </td>
+            <td style="padding: 20px 15px; text-align: right; font-size: 20px; font-weight: bold; color: #667eea;">
+              ₦${order.totalAmount.toLocaleString()}
+            </td>
+          </tr>
+        </table>
+      </div>
 
-        <h3 style="border-bottom: 3px solid #667eea; padding-bottom: 10px; color: #667eea;">🧾 Your Order Items</h3>
-        <div style="overflow-x: auto;">
-          <table style="width:100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-            <thead>
-              <tr style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
-                <th style="padding:14px; text-align:left; font-weight: 600;">Image</th>
-                <th style="padding:14px; text-align:left; font-weight: 600;">Product</th>
-                <th style="padding:14px; text-align:center; font-weight: 600;">Qty</th>
-                <th style="padding:14px; text-align:right; font-weight: 600;">Price</th>
-                <th style="padding:14px; text-align:right; font-weight: 600;">Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${cartItemsHtml}
-            </tbody>
-          </table>
-        </div>
-
-        <div style="margin-top: 30px; padding: 25px; background: linear-gradient(to right, #f9fafb, #f3f4f6); border-radius: 10px; border: 1px solid #e5e7eb;">
-          <table style="width: 100%;">
-            <tr>
-              <td style="padding: 8px 0; font-size: 16px;"><strong>Subtotal:</strong></td>
-              <td style="padding: 8px 0; text-align: right; font-size: 16px;">${formatCurrency(subtotal)}</td>
-            </tr>
-            <tr>
-              <td style="padding: 8px 0; font-size: 16px;"><strong>Shipping Fee (${shippingState}):</strong></td>
-              <td style="padding: 8px 0; text-align: right; font-size: 16px;">₦${Number(shippingFee).toLocaleString('en-NG', { minimumFractionDigits: 2 })}</td>
-            </tr>
-            <tr style="border-top: 2px solid #667eea;">
-              <td style="padding: 15px 0 0 0; font-size: 22px; font-weight: 700; color: #667eea;">TOTAL PAID:</td>
-              <td style="padding: 15px 0 0 0; text-align: right; font-size: 22px; font-weight: 700; color: #667eea;">${formatCurrency(totalAmount)}</td>
-            </tr>
-          </table>
-        </div>
-
-        <div style="margin-top: 30px; padding: 20px; background: #eff6ff; border-left: 4px solid #3b82f6; border-radius: 6px;">
-          <p style="margin: 0; font-size: 15px; color: #1e40af;">
-            <strong>📦 What's Next?</strong><br/>
-            We will contact you shortly via phone or email to confirm your delivery details and estimated delivery time.
-          </p>
-        </div>
-
-        <div style="margin-top: 30px; padding: 20px; background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; text-align: center;">
-          <p style="margin: 0; font-size: 15px; color: #166534; font-weight: 600;">
-            🎁 Thank you for shopping with FortuneHub!
-          </p>
-          <p style="margin: 10px 0 0 0; font-size: 13px; color: #15803d;">
-            We appreciate your business and look forward to serving you again.
-          </p>
-        </div>
-
-        <p style="color:#6b7280; font-size: 12px; margin-top: 35px; text-align: center; padding-top: 20px; border-top: 1px solid #e5e7eb;">
-          Please keep this email for your records.<br/>
-          Order Reference: <strong style="color: #1f2937;">${orderReference}</strong><br/>
-          <br/>
-          Need help? Contact us: <a href="mailto:${RESEND_FROM_EMAIL}" style="color: #667eea; text-decoration: none;">${RESEND_FROM_EMAIL}</a>
+      ${!isOwner ? `
+      <!-- Customer Message -->
+      <div style="background-color: #f0f7ff; border-left: 4px solid #667eea; padding: 15px; margin-top: 25px; border-radius: 4px;">
+        <p style="margin: 0; color: #333; line-height: 1.6;">
+          Thank you for shopping with <strong>Fortunehub</strong>! Your order is being processed and we'll notify you once it's shipped.
         </p>
       </div>
+      ` : `
+      <!-- Owner Message -->
+      <div style="background-color: #fff7e6; border-left: 4px solid #ffa500; padding: 15px; margin-top: 25px; border-radius: 4px;">
+        <p style="margin: 0; color: #333; line-height: 1.6;">
+          Please process this order and contact the customer at <strong>${order.email}</strong> or <strong>${order.phone}</strong>.
+        </p>
+      </div>
+      `}
+
     </div>
+
+    <!-- Footer -->
+    <div style="background-color: #f9f9f9; padding: 20px; text-align: center; border-top: 1px solid #eee;">
+      <p style="margin: 0; color: #666; font-size: 14px;">
+        © ${new Date().getFullYear()} Fortunehub. All rights reserved.
+      </p>
+      <p style="margin: 10px 0 0 0; color: #999; font-size: 12px;">
+        This is an automated email. Please do not reply.
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>
   `;
-
-  // ================================================================
-  // 📧 SEND EMAILS USING RESEND
-  // ================================================================
-  
-  try {
-    // OWNER EMAIL
-    if (OWNER_EMAIL) {
-      await resend.emails.send({
-        from: RESEND_FROM_EMAIL,
-        to: OWNER_EMAIL,
-        subject: `🛒 New Order #${orderReference} - ${customerName}`,
-        html: ownerEmailHtml
-      });
-      console.log('✅ Owner email sent with product images via Resend!');
-    } else {
-      console.warn('⚠️ OWNER_EMAIL not configured, skipping owner notification email.');
-    }
-
-    // CUSTOMER EMAIL
-    if (customerEmail && customerEmail !== 'unknown@email') {
-      await resend.emails.send({
-        from: RESEND_FROM_EMAIL,
-        to: customerEmail,
-        subject: `✅ Order Confirmation #${orderReference} - FortuneHub`,
-        html: customerEmailHtml
-      });
-      console.log('✅ Customer email sent with product images via Resend!');
-    } else {
-      console.warn('⚠️ Invalid customer email, skipping customer confirmation.');
-    }
-  } catch (error) {
-    console.error('❌ Resend email error:', error?.message || error);
-    throw error;
-  }
 }
 
-// ================================================================
-// GET ALL ORDERS
-// ================================================================
-app.get('/api/orders', async (req, res) => {
-  try {
-    const { rows } = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
-    res.json({ success: true, count: rows.length, orders: rows });
-  } catch (err) {
-    console.error('❌ Database error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch orders' });
-  }
+// API Routes
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'Fortunehub Backend API is running!', 
+    status: 'success',
+    timestamp: new Date().toISOString()
+  });
 });
 
-// ================================================================
-// GET SINGLE ORDER BY REFERENCE
-// ================================================================
-app.get('/api/orders/:reference', async (req, res) => {
-  try {
-    const { reference } = req.params;
-    const { rows } = await pool.query(
-      'SELECT * FROM orders WHERE order_reference = $1',
-      [reference]
-    );
-
-    if (!rows[0]) return res.status(404).json({ error: 'Order not found' });
-    res.json({ success: true, order: rows[0] });
-  } catch (err) {
-    console.error('❌ Database error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch order' });
-  }
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy',
+    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    resend: process.env.RESEND_API_KEY ? 'configured' : 'not configured'
+  });
 });
 
-// ================================================================
-// SEARCH ORDERS BY EMAIL OR REFERENCE
-// ================================================================
-app.post('/api/orders/search', async (req, res) => {
-  const { email, orderReference } = req.body;
-
-  if (!email && !orderReference) {
-    return res.status(400).json({
-      error: 'Please provide either email or order reference'
-    });
-  }
-
+// Create Order Endpoint
+app.post('/api/orders', async (req, res) => {
   try {
-    if (orderReference) {
-      const { rows } = await pool.query(
-        'SELECT * FROM orders WHERE order_reference = $1',
-        [orderReference]
-      );
-      return res.json({ success: true, count: rows.length, orders: rows });
-    }
+    console.log('📦 Receiving order:', req.body);
 
-    const { rows } = await pool.query(
-      'SELECT * FROM orders WHERE customer_email = $1 ORDER BY created_at DESC',
-      [email]
-    );
-    res.json({ success: true, count: rows.length, orders: rows });
-  } catch (err) {
-    console.error('❌ Database error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch orders' });
-  }
-});
+    const { customerName, email, phone, address, products, totalAmount } = req.body;
 
-// ================================================================
-// TEST EMAIL ENDPOINT
-// ================================================================
-app.post('/api/test-email', async (req, res) => {
-  const { testEmail } = req.body;
-
-  if (!testEmail) {
-    return res.status(400).json({ error: 'testEmail is required' });
-  }
-
-  try {
-    if (!process.env.RESEND_API_KEY) {
-      return res.status(500).json({
-        success: false,
-        error: 'Resend is not configured (missing RESEND_API_KEY)'
+    // Validation
+    if (!customerName || !email || !phone || !address || !products || !totalAmount) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Missing required fields' 
       });
     }
 
-    const result = await resend.emails.send({
-      from: RESEND_FROM_EMAIL,
-      to: testEmail,
-      subject: '✅ Test Email from FortuneHub Backend (Resend)',
-      html: `
-        <div style="font-family: Arial; padding: 20px;">
-          <h2>✅ Resend Email Working!</h2>
-          <p>This is a test email from your FortuneHub backend server using Resend.</p>
-          <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
-          <p><strong>Email Service:</strong> Resend</p>
-        </div>
-      `
+    // Create order in database
+    const newOrder = new Order({
+      customerName,
+      email,
+      phone,
+      address,
+      products,
+      totalAmount
     });
 
-    res.json({
-      success: true,
-      message: 'Test email sent successfully via Resend!',
-      emailId: result.id,
-      recipient: testEmail
+    const savedOrder = await newOrder.save();
+    console.log('✅ Order saved to database:', savedOrder._id);
+
+    // Send emails
+    try {
+      // Send email to customer
+      const customerEmailResult = await resend.emails.send({
+        from: 'Fortunehub <onboarding@resend.dev>', // Use verified domain in production
+        to: email,
+        subject: 'Order Confirmation - Fortunehub',
+        html: generateEmailHTML(savedOrder, false)
+      });
+
+      console.log('✅ Customer email sent:', customerEmailResult.id);
+
+      // Send email to owner
+      const ownerEmail = process.env.OWNER_EMAIL;
+      if (ownerEmail) {
+        const ownerEmailResult = await resend.emails.send({
+          from: 'Fortunehub <onboarding@resend.dev>',
+          to: ownerEmail,
+          subject: `New Order from ${customerName}`,
+          html: generateEmailHTML(savedOrder, true)
+        });
+
+        console.log('✅ Owner email sent:', ownerEmailResult.id);
+      } else {
+        console.warn('⚠️ OWNER_EMAIL not configured in environment variables');
+      }
+
+    } catch (emailError) {
+      console.error('❌ Email sending error:', emailError);
+      // Don't fail the order if email fails
+    }
+
+    res.status(201).json({ 
+      success: true, 
+      message: 'Order placed successfully!',
+      orderId: savedOrder._id
     });
+
   } catch (error) {
-    console.error('❌ Test email failed:', error?.message || error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to send test email',
-      details: error?.message || error
+    console.error('❌ Error creating order:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to create order',
+      error: error.message 
     });
   }
 });
 
-// ================================================================
-// START SERVER
-// ================================================================
-ensureTables()
-  .then(() => {
-    console.log('✅ Postgres tables ready');
-
-    app.listen(PORT, () => {
-      console.log('');
-      console.log('🚀 ================================');
-      console.log('🚀 FortuneHub Backend Server Started!');
-      console.log('🚀 ================================');
-      console.log(`📡 Server running on port ${PORT}`);
-      console.log('🗄️ Database: Postgres (Render)');
-      console.log('✉️  Email: Resend WITH IMAGES ✅');
-      console.log('🚀 ================================');
-      console.log('');
-    });
-  })
-  .catch((err) => {
-    console.error('❌ Failed to init database tables:', err.message);
-    process.exit(1);
-  });
-
-// ================================================================
-// GRACEFUL SHUTDOWN
-// ================================================================
-process.on('SIGINT', async () => {
-  console.log('\n⏳ Shutting down gracefully...');
+// Get all orders (for admin)
+app.get('/api/orders', async (req, res) => {
   try {
-    await pool.end();
-    console.log('✅ Postgres pool closed');
-  } catch (err) {
-    console.error('❌ Error closing Postgres pool:', err.message);
+    const orders = await Order.find().sort({ createdAt: -1 });
+    res.json({ success: true, orders });
+  } catch (error) {
+    console.error('Error fetching orders:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch orders',
+      error: error.message 
+    });
   }
-  process.exit(0);
+});
+
+// Serve static product images (if stored locally)
+app.use('/images', express.static('public/images'));
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ 
+    success: false, 
+    message: 'Route not found' 
+  });
+});
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error('Server error:', err);
+  res.status(500).json({ 
+    success: false, 
+    message: 'Internal server error',
+    error: err.message 
+  });
+});
+
+// Start server
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📧 Resend API Key: ${process.env.RESEND_API_KEY ? 'Configured ✅' : 'Missing ❌'}`);
+  console.log(`📮 Owner Email: ${process.env.OWNER_EMAIL || 'Not configured ⚠️'}`);
 });
