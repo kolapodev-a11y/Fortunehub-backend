@@ -579,7 +579,7 @@ async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, pai
 
     /* ── Header ── */
     .header {
-      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       padding: 36px 24px 28px;
       text-align: center;
     }
@@ -604,9 +604,9 @@ async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, pai
 
     /* ── Reference Box ── */
     .ref-box {
-      background: #f8faff;
+      background: linear-gradient(135deg, #f8faff 0%, #fef3ff 100%);
       border: 1px solid #e0e7ff;
-      border-left: 4px solid #4f46e5;
+      border-left: 4px solid #667eea;
       border-radius: 8px;
       padding: 14px 16px;
       margin-bottom: 22px;
@@ -630,7 +630,7 @@ async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, pai
 
     /* ── Items Table ── */
     .items-table { width:100%; border-collapse:collapse; margin-bottom:0; }
-    .items-table thead tr { background:#4f46e5; }
+    .items-table thead tr { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
     .items-table thead th {
       padding: 10px 8px;
       color: #fff;
@@ -646,8 +646,8 @@ async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, pai
 
     /* ── Totals ── */
     .totals-box {
-      background: #f8faff;
-      border: 1px solid #e0e7ff;
+      background: linear-gradient(135deg, #f8faff 0%, #fef3ff 100%);
+      border: 1px solid #e9d5ff;
       border-radius: 8px;
       padding: 14px 16px;
       margin: 14px 0 22px;
@@ -657,26 +657,26 @@ async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, pai
     .totals-box .lbl  { font-weight:500; }
     .totals-box .val  { text-align:right; font-weight:600; }
     .total-row td     { font-size:17px !important; font-weight:800 !important;
-                        color:#4f46e5 !important; padding-top:10px !important;
-                        border-top:2px solid #e0e7ff; }
+                        color:#667eea !important; padding-top:10px !important;
+                        border-top:2px solid #e9d5ff; }
 
     /* ── What's Next ── */
     .next-box {
-      background: #fffbeb;
-      border: 1px solid #fde68a;
+      background: linear-gradient(135deg, #fef3ff 0%, #faf5ff 100%);
+      border: 1px solid #e9d5ff;
       border-radius: 8px;
       padding: 14px 16px;
       margin-bottom: 24px;
     }
     .next-box p {
-      margin: 0; font-size: 14px; color: #78350f; line-height: 1.6;
+      margin: 0; font-size: 14px; color: #6b21a8; line-height: 1.6;
     }
-    .next-box strong { color: #92400e; }
+    .next-box strong { color: #7c3aed; }
 
     /* ── Footer ── */
     .footer {
-      background: #f8faff;
-      border-top: 1px solid #e5e7eb;
+      background: linear-gradient(135deg, #f8faff 0%, #faf5ff 100%);
+      border-top: 1px solid #e9d5ff;
       padding: 18px 24px;
       text-align: center;
     }
