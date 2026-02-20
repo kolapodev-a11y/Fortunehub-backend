@@ -1,15 +1,34 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const crypto = require('crypto');
 const { Resend } = require('resend');
 require('dotenv').config();
 
 const app = express();
 
-// Initialize Resend
-const resend = new Resend(process.env.RESEND_API_KEY);
+// ===================================================
+// 0) ENV + BASIC VALIDATION
+// ===================================================
+const PORT = process.env.PORT || 10000;
+const MONGODB_URI = process.env.MONGODB_URI;
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const OWNER_EMAIL = process.env.OWNER_EMAIL;
 
-// Enhanced CORS Configuration
+// IMPORTANT:
+// If you use the default `onboarding@resend.dev` sender without verifying a domain,
+// Resend may restrict delivery (e.g., only allow sending to your own verified email).
+// To send to any customer email, set MAIL_FROM to a verified sender like:
+//   MAIL_FROM="FortuneHub <no-reply@yourdomain.com>"
+const MAIL_FROM = process.env.MAIL_FROM || 'FortuneHub <onboarding@resend.dev>';
+
+// Initialize Resend (safe even if key is missing; sending will fail with a clear message)
+const resend = new Resend(RESEND_API_KEY || '');
+
+// ===================================================
+// 1) CORS
+// ===================================================
 const corsOptions = {
   origin: [
     'https://kolapodev-a11y.github.io',
@@ -24,31 +43,16 @@ const corsOptions = {
   optionsSuccessStatus: 200
 };
 
-// Middleware
 app.use(cors(corsOptions));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// Add trust proxy for Render deployment
 app.set('trust proxy', 1);
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => {
-    console.log('🔗 Mongoose connected to MongoDB');
-    console.log('✅ MongoDB Connected Successfully');
-    console.log('📊 Database:', mongoose.connection.name);
-  })
-  .catch((err) => {
-    console.error('❌ MongoDB Connection Error:', err.message);
-    process.exit(1);
-  });
-
-// Payment Schema
+// ===================================================
+// 2) PAYMENTS MODEL
+// ===================================================
 const paymentSchema = new mongoose.Schema({
   reference: { type: String, required: true, unique: true },
   email: { type: String, required: true },
-  amount: { type: Number, required: true },
+  amount: { type: Number, required: true }, // stored in NAIRA (not kobo)
   status: { type: String, default: 'pending' },
   currency: { type: String, default: 'NGN' },
   metadata: { type: Object },
@@ -60,7 +64,144 @@ const paymentSchema = new mongoose.Schema({
 
 const Payment = mongoose.model('Payment', paymentSchema);
 
-// Health Check Route
+// ===================================================
+// 3) WEBHOOK (MUST BE BEFORE express.json())
+//    - Paystack signature verification requires the RAW body bytes.
+//    - If express.json() runs first, signature verification will fail.
+// ===================================================
+app.post(
+  '/api/payment/webhook/paystack',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    try {
+      if (!PAYSTACK_SECRET_KEY) {
+        console.error('❌ PAYSTACK_SECRET_KEY is missing (webhook cannot be verified)');
+        return res.status(500).send('Server misconfigured');
+      }
+
+      const signature = req.headers['x-paystack-signature'];
+      const rawBody = req.body; // Buffer
+
+      const computedHash = crypto
+        .createHmac('sha512', PAYSTACK_SECRET_KEY)
+        .update(rawBody)
+        .digest('hex');
+
+      if (!signature || computedHash !== signature) {
+        console.log('❌ Invalid Paystack webhook signature');
+        return res.status(401).send('Invalid signature');
+      }
+
+      const event = JSON.parse(rawBody.toString('utf8'));
+      console.log('📨 Paystack webhook received:', event.event);
+
+      if (event.event === 'charge.success') {
+        const { reference, customer, amount, currency, paid_at, metadata } = event.data;
+        const email = customer?.email;
+        const amountNaira = amount / 100;
+
+        const updated = await Payment.findOneAndUpdate(
+          { reference },
+          {
+            reference,
+            email,
+            amount: amountNaira,
+            currency: currency || 'NGN',
+            status: 'success',
+            metadata,
+            paymentDate: paid_at ? new Date(paid_at) : new Date(),
+            webhookReceived: true
+          },
+          { upsert: true, new: true }
+        );
+
+        console.log(`✅ Webhook: Payment ${reference} confirmed (saved: ${updated._id})`);
+
+        // OPTIONAL but recommended:
+        // Send email here too, so customers still get emails even if the frontend
+        // never calls /api/payment/verify (e.g., user closes the Paystack popup).
+        if (!updated.emailSent) {
+          try {
+            const emailResp = await sendPaymentEmail({
+              toEmail: email,
+              reference,
+              amountNaira,
+              currency: currency || 'NGN',
+              paidAt: paid_at ? new Date(paid_at) : new Date()
+            });
+
+            await Payment.findOneAndUpdate({ reference }, { emailSent: true });
+            console.log('✅ Webhook email sent:', emailResp?.id || '(no id)');
+          } catch (e) {
+            console.error('❌ Webhook email failed:', e?.message || e);
+            // do not fail webhook
+          }
+        }
+      }
+
+      return res.status(200).send('Webhook received');
+    } catch (error) {
+      console.error('❌ Webhook error:', error);
+      return res.status(500).send('Webhook processing failed');
+    }
+  }
+);
+
+// ===================================================
+// 4) BODY PARSERS (AFTER WEBHOOK)
+// ===================================================
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// ===================================================
+// 5) MONGODB CONNECTION (WITH RETRY)
+// ===================================================
+let connecting = false;
+async function connectMongo() {
+  if (connecting) return;
+  if (!MONGODB_URI) {
+    console.error('❌ MONGODB_URI is missing');
+    process.exit(1);
+  }
+
+  connecting = true;
+  try {
+    await mongoose.connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: 10000,
+      connectTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+      maxPoolSize: 10
+    });
+
+    console.log('🔗 Mongoose connected to MongoDB');
+    console.log('✅ MongoDB Connected Successfully');
+    console.log('📊 Database:', mongoose.connection.name);
+  } catch (err) {
+    console.error('❌ MongoDB Connection Error:', err.message);
+    console.log('⏳ Retrying MongoDB connection in 5s...');
+    setTimeout(() => {
+      connecting = false;
+      connectMongo();
+    }, 5000);
+    return;
+  }
+  connecting = false;
+}
+
+mongoose.connection.on('disconnected', () => {
+  console.log('⚠️ MongoDB disconnected. Attempting to reconnect...');
+  connectMongo();
+});
+
+mongoose.connection.on('error', (err) => {
+  console.log('⚠️ MongoDB runtime error:', err?.message || err);
+});
+
+connectMongo();
+
+// ===================================================
+// 6) ROUTES
+// ===================================================
 app.get('/', (req, res) => {
   res.json({
     status: 'OK',
@@ -69,6 +210,7 @@ app.get('/', (req, res) => {
     endpoints: {
       verify: '/api/payment/verify?reference=xxx',
       webhook: '/api/payment/webhook/paystack',
+      payments: '/api/payments',
       health: '/health'
     }
   });
@@ -78,50 +220,75 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    resend: process.env.RESEND_API_KEY ? 'configured' : 'missing',
-    paystack: process.env.PAYSTACK_SECRET_KEY ? 'configured' : 'missing'
+    resend: RESEND_API_KEY ? 'configured' : 'missing',
+    mailFrom: MAIL_FROM,
+    paystack: PAYSTACK_SECRET_KEY ? 'configured' : 'missing'
   });
 });
 
-// ===================================================================
-// FIXED: Payment Verification Route - now handles both GET and POST
-// ===================================================================
-app.get('/api/payment/verify', async (req, res) => {
-  await handlePaymentVerification(req, res);
-});
+// Handles both GET + POST
+app.get('/api/payment/verify', async (req, res) => handlePaymentVerification(req, res));
+app.post('/api/payment/verify', async (req, res) => handlePaymentVerification(req, res));
 
-app.post('/api/payment/verify', async (req, res) => {
-  await handlePaymentVerification(req, res);
-});
-
-// Unified verification handler
 async function handlePaymentVerification(req, res) {
   try {
-    // Support both GET query params and POST body
-    const reference = req.query.reference || req.body.reference;
-    
+    const reference = req.query.reference || req.body?.reference;
+
     console.log('🔍 Verifying payment:', reference);
     console.log('🌐 Request origin:', req.headers.origin);
     console.log('📥 Request method:', req.method);
-    
+
     if (!reference) {
-      return res.status(400).json({
-        success: false,
-        message: 'Payment reference is required'
-      });
+      return res.status(400).json({ success: false, message: 'Payment reference is required' });
     }
 
-    // Check if already verified
+    // If payment is already success, do NOT exit early unless email was sent.
+    // This fixes the "first email failed, and now it never retries" problem.
     const existingPayment = await Payment.findOne({ reference });
     if (existingPayment && existingPayment.status === 'success') {
-      console.log('✅ Payment already verified:', reference);
+      if (existingPayment.emailSent) {
+        console.log('✅ Payment already verified and email already sent:', reference);
+        return res.status(200).json({
+          success: true,
+          message: 'Payment already verified',
+          emailSent: true,
+          data: {
+            reference: existingPayment.reference,
+            amount: existingPayment.amount,
+            email: existingPayment.email,
+            status: existingPayment.status,
+            paymentDate: existingPayment.paymentDate
+          }
+        });
+      }
+
+      // Try sending email again (no need to call Paystack again)
+      let resent = false;
+      try {
+        const emailResp = await sendPaymentEmail({
+          toEmail: existingPayment.email,
+          reference: existingPayment.reference,
+          amountNaira: existingPayment.amount,
+          currency: existingPayment.currency || 'NGN',
+          paidAt: existingPayment.paymentDate || new Date()
+        });
+        await Payment.findOneAndUpdate({ reference }, { emailSent: true });
+        console.log('✅ Email re-sent successfully:', emailResp?.id || '(no id)');
+        resent = true;
+      } catch (e) {
+        console.error('❌ Email re-send failed:', e?.message || e);
+      }
+
       return res.status(200).json({
         success: true,
-        message: 'Payment already verified',
-        emailSent: existingPayment.emailSent,
+        message: resent
+          ? 'Payment verified and email was sent successfully'
+          : 'Payment verified but email is still not sent (check backend logs / Resend settings)',
+        emailSent: resent,
         data: {
           reference: existingPayment.reference,
           amount: existingPayment.amount,
+          currency: existingPayment.currency || 'NGN',
           email: existingPayment.email,
           status: existingPayment.status,
           paymentDate: existingPayment.paymentDate
@@ -129,16 +296,23 @@ async function handlePaymentVerification(req, res) {
       });
     }
 
-    // Verify with Paystack
-    console.log('📡 Calling Paystack API...');
+    if (!PAYSTACK_SECRET_KEY) {
+      return res.status(500).json({
+        success: false,
+        message: 'Server misconfigured: PAYSTACK_SECRET_KEY is missing'
+      });
+    }
+
+    console.log('📡 Calling Paystack verify endpoint...');
+
     const paystackResponse = await fetch(
       `https://api.paystack.co/transaction/verify/${reference}`,
       {
         method: 'GET',
         headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
           'Content-Type': 'application/json'
-        },
+        }
       }
     );
 
@@ -153,7 +327,7 @@ async function handlePaymentVerification(req, res) {
 
     const paymentData = await paystackResponse.json();
     console.log('📦 Paystack response status:', paymentData.status);
-    console.log('📦 Payment status:', paymentData.data?.status);
+    console.log('📦 Paystack payment status:', paymentData.data?.status);
 
     if (!paymentData.status || paymentData.data.status !== 'success') {
       console.log('❌ Payment verification failed:', paymentData.message);
@@ -164,22 +338,22 @@ async function handlePaymentVerification(req, res) {
       });
     }
 
-    // Extract customer details
     const { customer, amount, currency, metadata, paid_at } = paymentData.data;
-    
+    const customerEmail = customer?.email;
+    const amountNaira = amount / 100;
+
     console.log('💰 Payment details:', {
-      email: customer.email,
-      amount: amount / 100,
+      email: customerEmail,
+      amountNaira,
       currency
     });
 
-    // Save to database
     const payment = await Payment.findOneAndUpdate(
       { reference },
       {
         reference,
-        email: customer.email,
-        amount: amount / 100, // Convert from kobo to naira
+        email: customerEmail,
+        amount: amountNaira,
         currency: currency || 'NGN',
         status: 'success',
         metadata,
@@ -190,203 +364,41 @@ async function handlePaymentVerification(req, res) {
 
     console.log('💾 Payment saved to database:', payment._id);
 
-    // Send confirmation email using Resend
+    // Send confirmation email
     let emailSent = false;
     try {
-      const emailResponse = await resend.emails.send({
-        from: 'FortuneHub <onboarding@resend.dev>',
-        to: customer.email,
-        cc: process.env.OWNER_EMAIL,
-        subject: '✅ Payment Successful - FortuneHub',
-        html: `
-          <!DOCTYPE html>
-          <html>
-            <head>
-              <meta charset="utf-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <style>
-                body { 
-                  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-                  line-height: 1.6; 
-                  color: #333; 
-                  margin: 0;
-                  padding: 0;
-                  background-color: #f4f4f4;
-                }
-                .container { 
-                  max-width: 600px; 
-                  margin: 20px auto; 
-                  background-color: #ffffff;
-                  border-radius: 10px;
-                  overflow: hidden;
-                  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-                }
-                .header { 
-                  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                  color: white; 
-                  padding: 40px 20px; 
-                  text-align: center; 
-                }
-                .header h1 {
-                  margin: 0;
-                  font-size: 28px;
-                }
-                .checkmark {
-                  width: 80px;
-                  height: 80px;
-                  border-radius: 50%;
-                  display: inline-block;
-                  background-color: rgba(255,255,255,0.2);
-                  padding: 15px;
-                  margin-bottom: 20px;
-                }
-                .content { 
-                  padding: 40px 30px; 
-                }
-                .content h2 {
-                  color: #667eea;
-                  margin-top: 0;
-                }
-                .payment-details {
-                  background-color: #f8f9fa;
-                  border-left: 4px solid #667eea;
-                  padding: 20px;
-                  margin: 20px 0;
-                  border-radius: 5px;
-                }
-                .payment-details ul {
-                  list-style: none;
-                  padding: 0;
-                  margin: 0;
-                }
-                .payment-details li {
-                  padding: 8px 0;
-                  border-bottom: 1px solid #e0e0e0;
-                }
-                .payment-details li:last-child {
-                  border-bottom: none;
-                }
-                .amount { 
-                  font-size: 32px; 
-                  font-weight: bold; 
-                  color: #667eea;
-                  display: block;
-                  margin: 10px 0;
-                }
-                .footer { 
-                  background-color: #f8f9fa;
-                  text-align: center; 
-                  padding: 20px; 
-                  font-size: 12px; 
-                  color: #666; 
-                }
-                .button {
-                  display: inline-block;
-                  padding: 12px 30px;
-                  background-color: #667eea;
-                  color: white;
-                  text-decoration: none;
-                  border-radius: 5px;
-                  margin-top: 20px;
-                  font-weight: bold;
-                }
-              </style>
-            </head>
-            <body>
-              <div class="container">
-                <div class="header">
-                  <div class="checkmark">
-                    <svg width="50" height="50" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-                      <polyline points="20 6 9 17 4 12"></polyline>
-                    </svg>
-                  </div>
-                  <h1>✅ Payment Successful!</h1>
-                </div>
-                
-                <div class="content">
-                  <h2>Thank You for Your Payment!</h2>
-                  <p>Dear Customer,</p>
-                  <p>Your payment has been successfully processed and confirmed. We've received your payment and your transaction is complete.</p>
-                  
-                  <div class="payment-details">
-                    <p><strong>📋 Payment Details:</strong></p>
-                    <ul>
-                      <li>
-                        <strong>Amount Paid:</strong> 
-                        <span class="amount">₦${(amount / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })}</span>
-                      </li>
-                      <li><strong>Reference:</strong> ${reference}</li>
-                      <li><strong>Email:</strong> ${customer.email}</li>
-                      <li><strong>Date:</strong> ${new Date().toLocaleString('en-NG', { 
-                        dateStyle: 'full', 
-                        timeStyle: 'short' 
-                      })}</li>
-                      <li><strong>Status:</strong> <span style="color: #10b981; font-weight: bold;">CONFIRMED ✓</span></li>
-                    </ul>
-                  </div>
-
-                  <p style="margin-top: 30px;">
-                    <strong>What's Next?</strong><br>
-                    You will receive further instructions via email shortly. Please keep this email for your records.
-                  </p>
-
-                  <p style="margin-top: 20px;">
-                    If you have any questions or concerns about this transaction, please don't hesitate to contact us at 
-                    <a href="mailto:${process.env.OWNER_EMAIL}" style="color: #667eea; text-decoration: none;">
-                      ${process.env.OWNER_EMAIL}
-                    </a>
-                  </p>
-
-                  <div style="text-align: center;">
-                    <a href="https://kolapodev-a11y.github.io/Fortunehub-frontend/" class="button">
-                      Visit FortuneHub
-                    </a>
-                  </div>
-                </div>
-                
-                <div class="footer">
-                  <p><strong>FortuneHub</strong></p>
-                  <p>&copy; ${new Date().getFullYear()} FortuneHub. All rights reserved.</p>
-                  <p style="margin-top: 10px; color: #999;">
-                    This is an automated email. Please do not reply to this message.
-                  </p>
-                </div>
-              </div>
-            </body>
-          </html>
-        `,
+      const emailResp = await sendPaymentEmail({
+        toEmail: customerEmail,
+        reference,
+        amountNaira,
+        currency: currency || 'NGN',
+        paidAt: paid_at ? new Date(paid_at) : new Date()
       });
 
-      console.log('✅ Email sent successfully:', emailResponse.id);
+      console.log('✅ Email sent successfully:', emailResp?.id || '(no id)');
       emailSent = true;
-
-      // Update payment record
-      await Payment.findOneAndUpdate(
-        { reference },
-        { emailSent: true }
-      );
-
-    } catch (emailError) {
-      console.error('❌ Email sending failed:', emailError);
-      console.error('Email error details:', emailError.message);
-      // Don't fail the whole transaction if email fails
+      await Payment.findOneAndUpdate({ reference }, { emailSent: true });
+    } catch (e) {
+      console.error('❌ Email sending failed:', e);
+      console.error('Email error details:', e?.message || e);
+      // Do not fail the payment verification if email fails
     }
 
-    // Return success response
     return res.status(200).json({
       success: true,
-      message: emailSent ? 'Payment verified and email sent successfully' : 'Payment verified successfully',
+      message: emailSent
+        ? 'Payment verified and email sent successfully'
+        : 'Payment verified successfully (email not sent — check Resend configuration)',
       emailSent,
       data: {
         reference,
-        amount: amount / 100,
+        amount: amountNaira,
         currency: currency || 'NGN',
-        email: customer.email,
+        email: customerEmail,
         status: 'success',
         paymentDate: paid_at || new Date().toISOString()
       }
     });
-
   } catch (error) {
     console.error('❌ Payment verification error:', error);
     console.error('Error stack:', error.stack);
@@ -398,98 +410,120 @@ async function handlePaymentVerification(req, res) {
   }
 }
 
-// Paystack Webhook Handler
-app.post('/api/payment/webhook/paystack', express.raw({ type: 'application/json' }), async (req, res) => {
-  try {
-    const crypto = require('crypto');
-    
-    // Verify webhook signature
-    const hash = crypto
-      .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
-      .update(JSON.stringify(req.body))
-      .digest('hex');
-
-    if (hash !== req.headers['x-paystack-signature']) {
-      console.log('❌ Invalid webhook signature');
-      return res.status(401).send('Invalid signature');
-    }
-
-    const event = req.body;
-    console.log('📨 Webhook received:', event.event);
-
-    if (event.event === 'charge.success') {
-      const { reference, customer, amount, currency } = event.data;
-      
-      // Update database
-      await Payment.findOneAndUpdate(
-        { reference },
-        { 
-          status: 'success',
-          webhookReceived: true,
-          email: customer.email,
-          amount: amount / 100,
-          currency: currency || 'NGN'
-        },
-        { upsert: true }
-      );
-
-      console.log(`✅ Webhook: Payment ${reference} confirmed`);
-    }
-
-    res.status(200).send('Webhook received');
-  } catch (error) {
-    console.error('❌ Webhook error:', error);
-    res.status(500).send('Webhook processing failed');
-  }
-});
-
-// Get all payments (for admin)
+// Admin: list last 50 payments
 app.get('/api/payments', async (req, res) => {
   try {
     const payments = await Payment.find().sort({ createdAt: -1 }).limit(50);
-    res.json({
-      success: true,
-      count: payments.length,
-      data: payments
-    });
+    res.json({ success: true, count: payments.length, data: payments });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// Start server
-const PORT = process.env.PORT || 10000;
+// ===================================================
+// 7) EMAIL SENDER (SHARED)
+// ===================================================
+async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, paidAt }) {
+  if (!toEmail) throw new Error('Missing customer email');
+  if (!RESEND_API_KEY) {
+    throw new Error('RESEND_API_KEY is missing (cannot send email)');
+  }
 
+  const amountFormatted = Number(amountNaira || 0).toLocaleString('en-NG', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+
+  // If OWNER_EMAIL missing, we just skip CC.
+  const cc = OWNER_EMAIL ? [OWNER_EMAIL] : undefined;
+
+  // NOTE: if you keep MAIL_FROM as onboarding@resend.dev without verifying a domain,
+  // Resend may NOT deliver emails to random recipients.
+  return resend.emails.send({
+    from: MAIL_FROM,
+    to: [toEmail],
+    cc,
+    subject: '✅ Payment Successful - FortuneHub',
+    html: `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            body { font-family: Arial, sans-serif; line-height: 1.6; color: #222; margin:0; background:#f4f4f4; }
+            .wrap { max-width: 620px; margin: 24px auto; background:#fff; border-radius: 10px; overflow:hidden; box-shadow: 0 4px 14px rgba(0,0,0,0.08); }
+            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color:#fff; padding: 28px 20px; text-align:center; }
+            .header h1 { margin: 0; font-size: 22px; }
+            .content { padding: 22px 22px 6px; }
+            .box { background:#f8f9fa; border-left: 4px solid #667eea; padding: 14px 14px; border-radius: 6px; }
+            .row { margin: 6px 0; }
+            .label { color:#555; font-weight: 700; }
+            .amount { font-size: 26px; font-weight: 800; color:#667eea; }
+            .footer { padding: 14px 20px; background:#f8f9fa; text-align:center; color:#666; font-size: 12px; }
+            a { color:#667eea; }
+          </style>
+        </head>
+        <body>
+          <div class="wrap">
+            <div class="header">
+              <h1>Payment Successful</h1>
+              <div style="margin-top:8px; opacity:0.9;">Thank you for shopping with FortuneHub</div>
+            </div>
+            <div class="content">
+              <p>Hi,</p>
+              <p>Your payment has been confirmed.</p>
+              <div class="box">
+                <div class="row"><span class="label">Amount:</span> <span class="amount">₦${amountFormatted}</span></div>
+                <div class="row"><span class="label">Reference:</span> ${reference}</div>
+                <div class="row"><span class="label">Currency:</span> ${currency || 'NGN'}</div>
+                <div class="row"><span class="label">Date:</span> ${new Date(paidAt || Date.now()).toLocaleString('en-NG')}</div>
+                <div class="row"><span class="label">Status:</span> CONFIRMED</div>
+              </div>
+              <p style="margin-top:18px;">If you have any issue, contact us at: ${OWNER_EMAIL ? `<a href="mailto:${OWNER_EMAIL}">${OWNER_EMAIL}</a>` : 'support'}.</p>
+            </div>
+            <div class="footer">
+              FortuneHub • ${new Date().getFullYear()}
+            </div>
+          </div>
+        </body>
+      </html>
+    `
+  });
+}
+
+// ===================================================
+// 8) START SERVER
+// ===================================================
 app.listen(PORT, () => {
   console.log('');
   console.log('🚀 ================================');
   console.log(`🚀 Server running on port ${PORT}`);
   console.log('🚀 ================================');
   console.log('📊 Environment:', process.env.NODE_ENV || 'development');
-  console.log('📧 Resend API Key:', process.env.RESEND_API_KEY ? '✅ Configured' : '❌ Missing');
-  console.log('📮 Owner Email:', process.env.OWNER_EMAIL ? `✅ ${process.env.OWNER_EMAIL}` : '❌ Missing');
-  console.log('🗄️  MongoDB URI:', process.env.MONGODB_URI ? '✅ Configured' : '❌ Missing');
-  console.log('💳 Paystack Secret:', process.env.PAYSTACK_SECRET_KEY ? '✅ Configured' : '❌ Missing');
+  console.log('📧 Resend API Key:', RESEND_API_KEY ? '✅ Configured' : '❌ Missing');
+  console.log('✉️  MAIL_FROM:', MAIL_FROM);
+  console.log('📮 Owner Email:', OWNER_EMAIL ? `✅ ${OWNER_EMAIL}` : '❌ Missing');
+  console.log('🗄️  MongoDB URI:', MONGODB_URI ? '✅ Configured' : '❌ Missing');
+  console.log('💳 Paystack Secret:', PAYSTACK_SECRET_KEY ? '✅ Configured' : '❌ Missing');
+
+  if (MAIL_FROM.includes('@resend.dev') && !process.env.MAIL_FROM) {
+    console.log('⚠️  Resend sender is set to onboarding@resend.dev.');
+    console.log('⚠️  If customers are not receiving emails, verify a domain in Resend and set MAIL_FROM.');
+  }
+
   console.log('🚀 ================================');
   console.log('');
 });
 
-// Handle graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('👋 SIGTERM signal received: closing HTTP server');
-  mongoose.connection.close(() => {
-    console.log('💤 MongoDB connection closed');
-    process.exit(0);
-  });
-});
+// Graceful shutdown
+process.on('SIGTERM', () => gracefulExit('SIGTERM'));
+process.on('SIGINT', () => gracefulExit('SIGINT'));
 
-process.on('SIGINT', () => {
-  console.log('👋 SIGINT signal received: closing HTTP server');
+function gracefulExit(signal) {
+  console.log(`👋 ${signal} signal received: closing HTTP server`);
   mongoose.connection.close(() => {
     console.log('💤 MongoDB connection closed');
     process.exit(0);
   });
-});
+}
