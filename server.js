@@ -16,11 +16,20 @@ const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const OWNER_EMAIL = process.env.OWNER_EMAIL;
 
-// IMPORTANT:
-// If you use the default `onboarding@resend.dev` sender without verifying a domain,
-// Resend may restrict delivery (e.g., only allow sending to your own verified email).
-// To send to any customer email, set MAIL_FROM to a verified sender like:
+// ---------------------------------------------------
+// ⚠️  SPAM / DOMAIN WARNING:
+// ---------------------------------------------------
+// Using `onboarding@resend.dev` (Resend test sender) causes emails to go
+// to SPAM for two reasons:
+//  1. It's a shared test domain — not your brand. Email clients distrust it.
+//  2. Resend restricts `onboarding@resend.dev` to only deliver to the
+//     verified account owner's email when in test/unverified mode.
+//     ANY other recipient gets silently blocked or spam-filed.
+//
+// ✅ FIX: Verify a custom domain in your Resend dashboard and set:
 //   MAIL_FROM="FortuneHub <no-reply@yourdomain.com>"
+//   in your Render environment variables.
+// ---------------------------------------------------
 const MAIL_FROM = process.env.MAIL_FROM || 'FortuneHub <onboarding@resend.dev>';
 
 // Initialize Resend (safe even if key is missing; sending will fail with a clear message)
@@ -50,24 +59,24 @@ app.set('trust proxy', 1);
 // 2) PAYMENTS MODEL
 // ===================================================
 const paymentSchema = new mongoose.Schema({
-  reference: { type: String, required: true, unique: true },
-  email: { type: String, required: true },
-  amount: { type: Number, required: true }, // stored in NAIRA (not kobo)
-  status: { type: String, default: 'pending' },
-  currency: { type: String, default: 'NGN' },
-  metadata: { type: Object },
-  paymentDate: { type: Date, default: Date.now },
+  reference:       { type: String, required: true, unique: true },
+  email:           { type: String, required: true },
+  amount:          { type: Number, required: true }, // stored in NAIRA (not kobo)
+  status:          { type: String, default: 'pending' },
+  currency:        { type: String, default: 'NGN' },
+  metadata:        { type: Object },
+  paymentDate:     { type: Date, default: Date.now },
   webhookReceived: { type: Boolean, default: false },
-  emailSent: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now }
+  emailSent:       { type: Boolean, default: false },
+  createdAt:       { type: Date, default: Date.now }
 });
 
 const Payment = mongoose.model('Payment', paymentSchema);
 
 // ===================================================
 // 3) WEBHOOK (MUST BE BEFORE express.json())
-//    - Paystack signature verification requires the RAW body bytes.
-//    - If express.json() runs first, signature verification will fail.
+//    Paystack signature verification requires the RAW body bytes.
+//    If express.json() runs first, signature verification will fail.
 // ===================================================
 app.post(
   '/api/payment/webhook/paystack',
@@ -80,7 +89,7 @@ app.post(
       }
 
       const signature = req.headers['x-paystack-signature'];
-      const rawBody = req.body; // Buffer
+      const rawBody   = req.body; // Buffer
 
       const computedHash = crypto
         .createHmac('sha512', PAYSTACK_SECRET_KEY)
@@ -97,7 +106,7 @@ app.post(
 
       if (event.event === 'charge.success') {
         const { reference, customer, amount, currency, paid_at, metadata } = event.data;
-        const email = customer?.email;
+        const email       = customer?.email;
         const amountNaira = amount / 100;
 
         const updated = await Payment.findOneAndUpdate(
@@ -109,7 +118,7 @@ app.post(
             currency: currency || 'NGN',
             status: 'success',
             metadata,
-            paymentDate: paid_at ? new Date(paid_at) : new Date(),
+            paymentDate:     paid_at ? new Date(paid_at) : new Date(),
             webhookReceived: true
           },
           { upsert: true, new: true }
@@ -117,17 +126,15 @@ app.post(
 
         console.log(`✅ Webhook: Payment ${reference} confirmed (saved: ${updated._id})`);
 
-        // OPTIONAL but recommended:
-        // Send email here too, so customers still get emails even if the frontend
-        // never calls /api/payment/verify (e.g., user closes the Paystack popup).
         if (!updated.emailSent) {
           try {
             const emailResp = await sendPaymentEmail({
-              toEmail: email,
+              toEmail:     email,
               reference,
               amountNaira,
-              currency: currency || 'NGN',
-              paidAt: paid_at ? new Date(paid_at) : new Date()
+              currency:    currency || 'NGN',
+              paidAt:      paid_at ? new Date(paid_at) : new Date(),
+              metadata:    metadata || {}
             });
 
             await Payment.findOneAndUpdate({ reference }, { emailSent: true });
@@ -168,9 +175,9 @@ async function connectMongo() {
   try {
     await mongoose.connect(MONGODB_URI, {
       serverSelectionTimeoutMS: 10000,
-      connectTimeoutMS: 10000,
-      socketTimeoutMS: 45000,
-      maxPoolSize: 10
+      connectTimeoutMS:         10000,
+      socketTimeoutMS:          45000,
+      maxPoolSize:              10
     });
 
     console.log('🔗 Mongoose connected to MongoDB');
@@ -204,30 +211,30 @@ connectMongo();
 // ===================================================
 app.get('/', (req, res) => {
   res.json({
-    status: 'OK',
-    message: 'FortuneHub Backend API is running',
+    status:    'OK',
+    message:   'FortuneHub Backend API is running',
     timestamp: new Date().toISOString(),
     endpoints: {
-      verify: '/api/payment/verify?reference=xxx',
-      webhook: '/api/payment/webhook/paystack',
+      verify:   '/api/payment/verify?reference=xxx',
+      webhook:  '/api/payment/webhook/paystack',
       payments: '/api/payments',
-      health: '/health'
+      health:   '/health'
     }
   });
 });
 
 app.get('/health', (req, res) => {
   res.json({
-    status: 'healthy',
-    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    resend: RESEND_API_KEY ? 'configured' : 'missing',
+    status:   'healthy',
+    mongodb:  mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    resend:   RESEND_API_KEY  ? 'configured' : 'missing',
     mailFrom: MAIL_FROM,
     paystack: PAYSTACK_SECRET_KEY ? 'configured' : 'missing'
   });
 });
 
 // Handles both GET + POST
-app.get('/api/payment/verify', async (req, res) => handlePaymentVerification(req, res));
+app.get('/api/payment/verify',  async (req, res) => handlePaymentVerification(req, res));
 app.post('/api/payment/verify', async (req, res) => handlePaymentVerification(req, res));
 
 async function handlePaymentVerification(req, res) {
@@ -235,42 +242,42 @@ async function handlePaymentVerification(req, res) {
     const reference = req.query.reference || req.body?.reference;
 
     console.log('🔍 Verifying payment:', reference);
-    console.log('🌐 Request origin:', req.headers.origin);
-    console.log('📥 Request method:', req.method);
+    console.log('🌐 Request origin:',    req.headers.origin);
+    console.log('📥 Request method:',    req.method);
 
     if (!reference) {
       return res.status(400).json({ success: false, message: 'Payment reference is required' });
     }
 
-    // If payment is already success, do NOT exit early unless email was sent.
-    // This fixes the "first email failed, and now it never retries" problem.
+    // If already success — skip Paystack call but retry email if not sent
     const existingPayment = await Payment.findOne({ reference });
     if (existingPayment && existingPayment.status === 'success') {
       if (existingPayment.emailSent) {
         console.log('✅ Payment already verified and email already sent:', reference);
         return res.status(200).json({
-          success: true,
-          message: 'Payment already verified',
+          success:   true,
+          message:   'Payment already verified',
           emailSent: true,
           data: {
-            reference: existingPayment.reference,
-            amount: existingPayment.amount,
-            email: existingPayment.email,
-            status: existingPayment.status,
+            reference:   existingPayment.reference,
+            amount:      existingPayment.amount,
+            email:       existingPayment.email,
+            status:      existingPayment.status,
             paymentDate: existingPayment.paymentDate
           }
         });
       }
 
-      // Try sending email again (no need to call Paystack again)
+      // Retry email
       let resent = false;
       try {
         const emailResp = await sendPaymentEmail({
-          toEmail: existingPayment.email,
-          reference: existingPayment.reference,
+          toEmail:     existingPayment.email,
+          reference:   existingPayment.reference,
           amountNaira: existingPayment.amount,
-          currency: existingPayment.currency || 'NGN',
-          paidAt: existingPayment.paymentDate || new Date()
+          currency:    existingPayment.currency || 'NGN',
+          paidAt:      existingPayment.paymentDate || new Date(),
+          metadata:    existingPayment.metadata || {}
         });
         await Payment.findOneAndUpdate({ reference }, { emailSent: true });
         console.log('✅ Email re-sent successfully:', emailResp?.id || '(no id)');
@@ -280,17 +287,17 @@ async function handlePaymentVerification(req, res) {
       }
 
       return res.status(200).json({
-        success: true,
-        message: resent
+        success:   true,
+        message:   resent
           ? 'Payment verified and email was sent successfully'
-          : 'Payment verified but email is still not sent (check backend logs / Resend settings)',
+          : 'Payment verified but email still not sent (check backend logs / Resend settings)',
         emailSent: resent,
         data: {
-          reference: existingPayment.reference,
-          amount: existingPayment.amount,
-          currency: existingPayment.currency || 'NGN',
-          email: existingPayment.email,
-          status: existingPayment.status,
+          reference:   existingPayment.reference,
+          amount:      existingPayment.amount,
+          currency:    existingPayment.currency || 'NGN',
+          email:       existingPayment.email,
+          status:      existingPayment.status,
           paymentDate: existingPayment.paymentDate
         }
       });
@@ -308,9 +315,9 @@ async function handlePaymentVerification(req, res) {
     const paystackResponse = await fetch(
       `https://api.paystack.co/transaction/verify/${reference}`,
       {
-        method: 'GET',
+        method:  'GET',
         headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+          Authorization:  `Bearer ${PAYSTACK_SECRET_KEY}`,
           'Content-Type': 'application/json'
         }
       }
@@ -321,41 +328,37 @@ async function handlePaymentVerification(req, res) {
       return res.status(400).json({
         success: false,
         message: 'Failed to verify payment with Paystack',
-        error: `API returned ${paystackResponse.status}`
+        error:   `API returned ${paystackResponse.status}`
       });
     }
 
     const paymentData = await paystackResponse.json();
     console.log('📦 Paystack response status:', paymentData.status);
-    console.log('📦 Paystack payment status:', paymentData.data?.status);
+    console.log('📦 Paystack payment status:',  paymentData.data?.status);
 
     if (!paymentData.status || paymentData.data.status !== 'success') {
       console.log('❌ Payment verification failed:', paymentData.message);
       return res.status(400).json({
         success: false,
         message: paymentData.message || 'Payment verification failed',
-        error: paymentData.message
+        error:   paymentData.message
       });
     }
 
     const { customer, amount, currency, metadata, paid_at } = paymentData.data;
     const customerEmail = customer?.email;
-    const amountNaira = amount / 100;
+    const amountNaira   = amount / 100;
 
-    console.log('💰 Payment details:', {
-      email: customerEmail,
-      amountNaira,
-      currency
-    });
+    console.log('💰 Payment details:', { email: customerEmail, amountNaira, currency });
 
     const payment = await Payment.findOneAndUpdate(
       { reference },
       {
         reference,
-        email: customerEmail,
-        amount: amountNaira,
-        currency: currency || 'NGN',
-        status: 'success',
+        email:       customerEmail,
+        amount:      amountNaira,
+        currency:    currency || 'NGN',
+        status:      'success',
         metadata,
         paymentDate: paid_at ? new Date(paid_at) : new Date()
       },
@@ -364,15 +367,16 @@ async function handlePaymentVerification(req, res) {
 
     console.log('💾 Payment saved to database:', payment._id);
 
-    // Send confirmation email
+    // Send rich confirmation email
     let emailSent = false;
     try {
       const emailResp = await sendPaymentEmail({
-        toEmail: customerEmail,
+        toEmail:     customerEmail,
         reference,
         amountNaira,
-        currency: currency || 'NGN',
-        paidAt: paid_at ? new Date(paid_at) : new Date()
+        currency:    currency || 'NGN',
+        paidAt:      paid_at ? new Date(paid_at) : new Date(),
+        metadata:    metadata || {}
       });
 
       console.log('✅ Email sent successfully:', emailResp?.id || '(no id)');
@@ -381,21 +385,20 @@ async function handlePaymentVerification(req, res) {
     } catch (e) {
       console.error('❌ Email sending failed:', e);
       console.error('Email error details:', e?.message || e);
-      // Do not fail the payment verification if email fails
     }
 
     return res.status(200).json({
-      success: true,
-      message: emailSent
+      success:   true,
+      message:   emailSent
         ? 'Payment verified and email sent successfully'
         : 'Payment verified successfully (email not sent — check Resend configuration)',
       emailSent,
       data: {
         reference,
-        amount: amountNaira,
-        currency: currency || 'NGN',
-        email: customerEmail,
-        status: 'success',
+        amount:      amountNaira,
+        currency:    currency || 'NGN',
+        email:       customerEmail,
+        status:      'success',
         paymentDate: paid_at || new Date().toISOString()
       }
     });
@@ -405,7 +408,7 @@ async function handlePaymentVerification(req, res) {
     return res.status(500).json({
       success: false,
       message: 'An error occurred while verifying payment',
-      error: error.message
+      error:   error.message
     });
   }
 }
@@ -421,79 +424,408 @@ app.get('/api/payments', async (req, res) => {
 });
 
 // ===================================================
-// 7) EMAIL SENDER (SHARED)
+// 7) UTILITY: Format currency (Naira)
 // ===================================================
-async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, paidAt }) {
-  if (!toEmail) throw new Error('Missing customer email');
-  if (!RESEND_API_KEY) {
-    throw new Error('RESEND_API_KEY is missing (cannot send email)');
-  }
-
-  const amountFormatted = Number(amountNaira || 0).toLocaleString('en-NG', {
+function formatNaira(amount) {
+  return '₦' + Number(amount || 0).toLocaleString('en-NG', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   });
+}
 
-  // If OWNER_EMAIL missing, we just skip CC.
+// ===================================================
+// 8) UTILITY: Format date in WAT (UTC+1, Africa/Lagos)
+//    Fix: Render servers run UTC. Without timezone option,
+//    dates show 1 hour behind Nigerian time.
+// ===================================================
+function formatDateWAT(date) {
+  return new Date(date).toLocaleString('en-NG', {
+    timeZone:     'Africa/Lagos',
+    day:          '2-digit',
+    month:        '2-digit',
+    year:         'numeric',
+    hour:         '2-digit',
+    minute:       '2-digit',
+    second:       '2-digit',
+    hour12:       false
+  });
+}
+
+// ===================================================
+// 9) EMAIL SENDER — RICH FULL-INFO TEMPLATE
+//
+// Parameters:
+//  toEmail     — customer email
+//  reference   — Paystack transaction reference
+//  amountNaira — total paid (naira)
+//  currency    — e.g. 'NGN'
+//  paidAt      — Date object / ISO string
+//  metadata    — Paystack metadata object (customer_name, cart_items,
+//                shipping_fee, shipping_state, customer_phone)
+//
+// NOTE: To include shipping_fee & shipping_state in the email you MUST
+// add them to Paystack metadata in your script.js:
+//
+//   metadata: {
+//     customer_name:  name,
+//     customer_email: email,
+//     customer_phone: phone,
+//     cart_items:     cart,
+//     shipping_fee:   shippingFeeNaira,                                  // ← ADD THIS
+//     shipping_state: shippingStateSelect.options[
+//                       shippingStateSelect.selectedIndex]?.text || ''   // ← ADD THIS
+//   }
+// ===================================================
+async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, paidAt, metadata }) {
+  if (!toEmail) throw new Error('Missing customer email');
+  if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY is missing (cannot send email)');
+
+  // --- Extract metadata fields (with safe fallbacks) ---
+  const customerName   = metadata?.customer_name   || metadata?.custom_fields?.[0]?.value || 'Customer';
+  const customerPhone  = metadata?.customer_phone  || '';
+  const cartItems      = Array.isArray(metadata?.cart_items) ? metadata.cart_items : [];
+  const shippingFee    = Number(metadata?.shipping_fee  || 0);   // naira
+  const shippingState  = metadata?.shipping_state  || '';
+
+  // --- Subtotal from cart items (prices stored in KOBO in cart) ---
+  const subtotalKobo = cartItems.reduce((sum, item) => sum + (item.price || 0) * (item.quantity || 1), 0);
+  const subtotalNaira = subtotalKobo / 100;
+
+  // --- If shipping_fee not in metadata, derive from total - subtotal ---
+  const derivedShippingFee = shippingFee > 0
+    ? shippingFee
+    : (cartItems.length > 0 ? Math.max(0, amountNaira - subtotalNaira) : 0);
+
+  // --- Final subtotal to show: if cart available use it, else total - shipping ---
+  const displaySubtotal = cartItems.length > 0 ? subtotalNaira : (amountNaira - derivedShippingFee);
+
+  // --- Date formatted in WAT (Nigerian time, UTC+1) ---
+  const dateFormatted = formatDateWAT(paidAt || new Date());
+  const yearNow       = new Date().getFullYear();
+
+  // --- Build items table rows ---
+  const itemsHTML = cartItems.length > 0
+    ? cartItems.map(item => {
+        const itemPrice = Number(item.price || 0) / 100;  // kobo → naira
+        const qty       = Number(item.quantity || 1);
+        const lineTotal = itemPrice * qty;
+        const imgSrc    = item.image
+          ? `<img src="${item.image}" alt="${item.name || 'Product'}"
+                  style="width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid #e8e8e8;" />`
+          : '<div style="width:60px;height:60px;background:#f0f0f0;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#999;">No img</div>';
+
+        return `
+          <tr>
+            <td style="padding:10px 8px;border-bottom:1px solid #f0f0f0;vertical-align:middle;">${imgSrc}</td>
+            <td style="padding:10px 8px;border-bottom:1px solid #f0f0f0;vertical-align:middle;font-size:14px;color:#333;">
+              ${item.name || 'Item'}
+            </td>
+            <td style="padding:10px 8px;border-bottom:1px solid #f0f0f0;vertical-align:middle;text-align:center;font-size:14px;color:#333;">
+              ${qty}
+            </td>
+            <td style="padding:10px 8px;border-bottom:1px solid #f0f0f0;vertical-align:middle;text-align:right;font-size:14px;font-weight:700;color:#333;">
+              ${formatNaira(lineTotal)}
+            </td>
+          </tr>
+        `;
+      }).join('')
+    : `
+        <tr>
+          <td colspan="4" style="padding:14px 8px;text-align:center;color:#888;font-size:13px;">
+            Order items not available
+          </td>
+        </tr>
+      `;
+
+  // --- Shipping row label ---
+  const shippingLabel = shippingState
+    ? `Shipping Fee (${shippingState})`
+    : 'Shipping Fee';
+
+  // CC owner email if set
   const cc = OWNER_EMAIL ? [OWNER_EMAIL] : undefined;
 
-  // NOTE: if you keep MAIL_FROM as onboarding@resend.dev without verifying a domain,
-  // Resend may NOT deliver emails to random recipients.
   return resend.emails.send({
-    from: MAIL_FROM,
-    to: [toEmail],
+    from:    MAIL_FROM,
+    to:      [toEmail],
     cc,
-    subject: '✅ Payment Successful - FortuneHub',
+    subject: '✅ Order Confirmed! - FortuneHub',
     html: `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #222; margin:0; background:#f4f4f4; }
-            .wrap { max-width: 620px; margin: 24px auto; background:#fff; border-radius: 10px; overflow:hidden; box-shadow: 0 4px 14px rgba(0,0,0,0.08); }
-            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color:#fff; padding: 28px 20px; text-align:center; }
-            .header h1 { margin: 0; font-size: 22px; }
-            .content { padding: 22px 22px 6px; }
-            .box { background:#f8f9fa; border-left: 4px solid #667eea; padding: 14px 14px; border-radius: 6px; }
-            .row { margin: 6px 0; }
-            .label { color:#555; font-weight: 700; }
-            .amount { font-size: 26px; font-weight: 800; color:#667eea; }
-            .footer { padding: 14px 20px; background:#f8f9fa; text-align:center; color:#666; font-size: 12px; }
-            a { color:#667eea; }
-          </style>
-        </head>
-        <body>
-          <div class="wrap">
-            <div class="header">
-              <h1>Payment Successful</h1>
-              <div style="margin-top:8px; opacity:0.9;">Thank you for shopping with FortuneHub</div>
-            </div>
-            <div class="content">
-              <p>Hi,</p>
-              <p>Your payment has been confirmed.</p>
-              <div class="box">
-                <div class="row"><span class="label">Amount:</span> <span class="amount">₦${amountFormatted}</span></div>
-                <div class="row"><span class="label">Reference:</span> ${reference}</div>
-                <div class="row"><span class="label">Currency:</span> ${currency || 'NGN'}</div>
-                <div class="row"><span class="label">Date:</span> ${new Date(paidAt || Date.now()).toLocaleString('en-NG')}</div>
-                <div class="row"><span class="label">Status:</span> CONFIRMED</div>
-              </div>
-              <p style="margin-top:18px;">If you have any issue, contact us at: ${OWNER_EMAIL ? `<a href="mailto:${OWNER_EMAIL}">${OWNER_EMAIL}</a>` : 'support'}.</p>
-            </div>
-            <div class="footer">
-              FortuneHub • ${new Date().getFullYear()}
-            </div>
-          </div>
-        </body>
-      </html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Order Confirmed – FortuneHub</title>
+  <!--[if mso]>
+  <style>table{border-collapse:collapse;}td,th{mso-line-height-rule:exactly;}</style>
+  <![endif]-->
+  <style>
+    /* ── Reset ── */
+    * { box-sizing: border-box; }
+    body, table, td, p, a, li, blockquote {
+      -webkit-text-size-adjust: 100%;
+      -ms-text-size-adjust: 100%;
+    }
+    body  { margin:0; padding:0; background:#f0f2f5; font-family: 'Segoe UI', Arial, sans-serif; }
+    table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img   { border:0; outline:none; text-decoration:none; display:block; max-width:100%; }
+    a     { color: #4f46e5; text-decoration: none; }
+
+    /* ── Wrapper ── */
+    .email-wrapper  { width:100%; max-width:620px; margin:0 auto; }
+    .email-body     { background:#ffffff; border-radius:12px; overflow:hidden;
+                      box-shadow: 0 4px 24px rgba(0,0,0,0.10); }
+
+    /* ── Header ── */
+    .header {
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      padding: 36px 24px 28px;
+      text-align: center;
+    }
+    .header .checkmark { font-size: 40px; line-height:1; margin-bottom:10px; }
+    .header h1 {
+      margin: 0; padding: 0;
+      color: #ffffff;
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+    }
+    .header p  {
+      margin: 8px 0 0; padding: 0;
+      color: rgba(255,255,255,0.88);
+      font-size: 14px;
+    }
+
+    /* ── Content ── */
+    .content { padding: 28px 28px 8px; }
+    .greeting { font-size:16px; color:#1f2937; margin:0 0 6px; font-weight:600; }
+    .intro    { font-size:14px; color:#6b7280; margin:0 0 22px; line-height:1.6; }
+
+    /* ── Reference Box ── */
+    .ref-box {
+      background: #f8faff;
+      border: 1px solid #e0e7ff;
+      border-left: 4px solid #4f46e5;
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 22px;
+    }
+    .ref-box table { width:100%; }
+    .ref-box td   { font-size:13px; padding:3px 0; color:#374151; }
+    .ref-box .lbl { font-weight:700; color:#4b5563; width:130px; }
+
+    /* ── Section heading ── */
+    .section-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: #1f2937;
+      margin: 0 0 10px;
+      padding-bottom: 6px;
+      border-bottom: 2px solid #f0f0f0;
+      display:flex;
+      align-items:center;
+      gap:6px;
+    }
+
+    /* ── Items Table ── */
+    .items-table { width:100%; border-collapse:collapse; margin-bottom:0; }
+    .items-table thead tr { background:#4f46e5; }
+    .items-table thead th {
+      padding: 10px 8px;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      text-align: left;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .items-table thead th:nth-child(3) { text-align:center; }
+    .items-table thead th:nth-child(4) { text-align:right;  }
+    .items-table tbody tr:nth-child(even) td { background:#fafafa; }
+
+    /* ── Totals ── */
+    .totals-box {
+      background: #f8faff;
+      border: 1px solid #e0e7ff;
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin: 14px 0 22px;
+    }
+    .totals-box table { width:100%; }
+    .totals-box td    { font-size:14px; padding:4px 0; color:#374151; }
+    .totals-box .lbl  { font-weight:500; }
+    .totals-box .val  { text-align:right; font-weight:600; }
+    .total-row td     { font-size:17px !important; font-weight:800 !important;
+                        color:#4f46e5 !important; padding-top:10px !important;
+                        border-top:2px solid #e0e7ff; }
+
+    /* ── What's Next ── */
+    .next-box {
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 24px;
+    }
+    .next-box p {
+      margin: 0; font-size: 14px; color: #78350f; line-height: 1.6;
+    }
+    .next-box strong { color: #92400e; }
+
+    /* ── Footer ── */
+    .footer {
+      background: #f8faff;
+      border-top: 1px solid #e5e7eb;
+      padding: 18px 24px;
+      text-align: center;
+    }
+    .footer p  { margin:3px 0; font-size:12px; color:#9ca3af; }
+    .footer .brand { font-size:13px; font-weight:700; color:#6b7280; }
+
+    /* ── Responsive ── */
+    @media only screen and (max-width: 480px) {
+      .content     { padding: 20px 16px 8px !important; }
+      .header      { padding: 28px 16px 22px !important; }
+      .header h1   { font-size: 22px !important; }
+      .items-table thead th,
+      .items-table tbody td { font-size: 12px !important; padding: 8px 5px !important; }
+      .items-table thead th:first-child { display:none; }
+      .items-table tbody td:first-child { display:none; }
+    }
+  </style>
+</head>
+<body>
+  <table width="100%" cellpadding="0" cellspacing="0" border="0"
+         style="background:#f0f2f5; padding: 24px 12px;">
+    <tr>
+      <td align="center">
+        <table class="email-wrapper" cellpadding="0" cellspacing="0" border="0"
+               style="width:100%;max-width:620px;">
+          <tr>
+            <td>
+              <div class="email-body">
+
+                <!-- ══════════ HEADER ══════════ -->
+                <div class="header">
+                  <div class="checkmark">✅</div>
+                  <h1>Order Confirmed!</h1>
+                  <p>Thank you for shopping with <strong>FortuneHub</strong></p>
+                </div>
+
+                <!-- ══════════ BODY ══════════ -->
+                <div class="content">
+                  <p class="greeting">Hi ${customerName},</p>
+                  <p class="intro">
+                    Thank you for your purchase! Your payment was successful
+                    and your order is being processed.
+                    ${customerPhone ? `<br>We'll keep you updated on <strong>${customerPhone}</strong>.` : ''}
+                  </p>
+
+                  <!-- Reference Block -->
+                  <div class="ref-box">
+                    <table>
+                      <tr>
+                        <td class="lbl">Order Reference:</td>
+                        <td><strong>${reference}</strong></td>
+                      </tr>
+                      <tr>
+                        <td class="lbl">Date &amp; Time:</td>
+                        <td>${dateFormatted}</td>
+                      </tr>
+                      <tr>
+                        <td class="lbl">Currency:</td>
+                        <td>${currency || 'NGN'}</td>
+                      </tr>
+                      <tr>
+                        <td class="lbl">Status:</td>
+                        <td>
+                          <span style="display:inline-block;background:#d1fae5;color:#065f46;
+                                       padding:2px 10px;border-radius:20px;font-size:12px;
+                                       font-weight:700;">
+                            ✔ CONFIRMED
+                          </span>
+                        </td>
+                      </tr>
+                      ${shippingState ? `
+                      <tr>
+                        <td class="lbl">Delivery State:</td>
+                        <td>${shippingState}</td>
+                      </tr>` : ''}
+                    </table>
+                  </div>
+
+                  <!-- ── Items ── -->
+                  <div class="section-title">
+                    <span>🛍️</span> Your Items
+                  </div>
+
+                  <table class="items-table" style="margin-bottom:0;">
+                    <thead>
+                      <tr>
+                        <th style="width:70px;">Image</th>
+                        <th>Product</th>
+                        <th style="width:50px;text-align:center;">Qty</th>
+                        <th style="width:110px;text-align:right;">Price</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${itemsHTML}
+                    </tbody>
+                  </table>
+
+                  <!-- ── Totals ── -->
+                  <div class="totals-box">
+                    <table>
+                      ${cartItems.length > 0 ? `
+                      <tr>
+                        <td class="lbl">Subtotal:</td>
+                        <td class="val">${formatNaira(displaySubtotal)}</td>
+                      </tr>
+                      <tr>
+                        <td class="lbl">${shippingLabel}:</td>
+                        <td class="val">${formatNaira(derivedShippingFee)}</td>
+                      </tr>` : ''}
+                      <tr class="total-row">
+                        <td class="lbl">TOTAL PAID:</td>
+                        <td class="val">${formatNaira(amountNaira)}</td>
+                      </tr>
+                    </table>
+                  </div>
+
+                  <!-- ── What's Next ── -->
+                  <div class="next-box">
+                    <p>
+                      <strong>📦 What's Next?</strong><br>
+                      Your order will be processed and shipped soon.
+                      We'll send you a tracking number once it's dispatched.
+                    </p>
+                  </div>
+
+                </div><!-- /.content -->
+
+                <!-- ══════════ FOOTER ══════════ -->
+                <div class="footer">
+                  <p>Need help? Reply to this email${OWNER_EMAIL ? ` or contact us at <a href="mailto:${OWNER_EMAIL}">${OWNER_EMAIL}</a>` : ''}.</p>
+                  <p>Order Reference: <strong>${reference}</strong></p>
+                  <p class="brand">© ${yearNow} FortuneHub. All rights reserved.</p>
+                </div>
+
+              </div><!-- /.email-body -->
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
     `
   });
 }
 
 // ===================================================
-// 8) START SERVER
+// 10) START SERVER
 // ===================================================
 app.listen(PORT, () => {
   console.log('');
@@ -501,15 +833,19 @@ app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log('🚀 ================================');
   console.log('📊 Environment:', process.env.NODE_ENV || 'development');
-  console.log('📧 Resend API Key:', RESEND_API_KEY ? '✅ Configured' : '❌ Missing');
-  console.log('✉️  MAIL_FROM:', MAIL_FROM);
-  console.log('📮 Owner Email:', OWNER_EMAIL ? `✅ ${OWNER_EMAIL}` : '❌ Missing');
-  console.log('🗄️  MongoDB URI:', MONGODB_URI ? '✅ Configured' : '❌ Missing');
-  console.log('💳 Paystack Secret:', PAYSTACK_SECRET_KEY ? '✅ Configured' : '❌ Missing');
+  console.log('📧 Resend API Key:',  RESEND_API_KEY        ? '✅ Configured' : '❌ Missing');
+  console.log('✉️  MAIL_FROM:',       MAIL_FROM);
+  console.log('📮 Owner Email:',     OWNER_EMAIL           ? `✅ ${OWNER_EMAIL}` : '❌ Missing');
+  console.log('🗄️  MongoDB URI:',     MONGODB_URI           ? '✅ Configured' : '❌ Missing');
+  console.log('💳 Paystack Secret:', PAYSTACK_SECRET_KEY   ? '✅ Configured' : '❌ Missing');
 
   if (MAIL_FROM.includes('@resend.dev') && !process.env.MAIL_FROM) {
-    console.log('⚠️  Resend sender is set to onboarding@resend.dev.');
-    console.log('⚠️  If customers are not receiving emails, verify a domain in Resend and set MAIL_FROM.');
+    console.warn('');
+    console.warn('⚠️  ============================================================');
+    console.warn('⚠️  Sender is onboarding@resend.dev (Resend test domain).');
+    console.warn('⚠️  Emails WILL go to SPAM for non-verified recipients.');
+    console.warn('⚠️  Fix: Verify a custom domain in Resend and set MAIL_FROM.');
+    console.warn('⚠️  ============================================================');
   }
 
   console.log('🚀 ================================');
@@ -518,7 +854,7 @@ app.listen(PORT, () => {
 
 // Graceful shutdown
 process.on('SIGTERM', () => gracefulExit('SIGTERM'));
-process.on('SIGINT', () => gracefulExit('SIGINT'));
+process.on('SIGINT',  () => gracefulExit('SIGINT'));
 
 function gracefulExit(signal) {
   console.log(`👋 ${signal} signal received: closing HTTP server`);
