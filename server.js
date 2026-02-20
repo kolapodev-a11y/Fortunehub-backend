@@ -1,640 +1,704 @@
-// ===================================
-// FORTUNEHUB BACKEND - FIXED VERSION
-// ===================================
+// ================================================================
+// FORTUNEHUB E-COMMERCE BACKEND SERVER (RENDER + MONGODB + RESEND)
+// - Orders stored in MongoDB Atlas
+// - Resend for owner + customer emails
+// - Product images included in emails
+// ================================================================
 
 require('dotenv').config();
 const express = require('express');
-const mongoose = require('mongoose');
 const cors = require('cors');
 const axios = require('axios');
+const { MongoClient, ObjectId } = require('mongodb');
 const { Resend } = require('resend');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
-// ===================================
-// MIDDLEWARE
-// ===================================
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// ================================================================
+// CORS
+// ================================================================
+function buildCorsOrigin() {
+  const raw = (process.env.ALLOWED_ORIGINS || '').trim();
+
+  // If not set, allow all
+  if (!raw) return '*';
+
+  // If user sets "*", allow all
+  if (raw === '*') return '*';
+
+  // Otherwise treat as comma-separated list
+  const list = raw.split(',').map(x => x.trim()).filter(Boolean);
+  return list.length ? list : '*';
+}
+
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-    'https://kolapodev-a11y.github.io'
-  ],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  origin: buildCorsOrigin(),
+  credentials: true
 }));
 
-// ===================================
-// ENVIRONMENT VALIDATION
-// ===================================
-const requiredEnvVars = [
-  'MONGODB_URI',
-  'PAYSTACK_SECRET_KEY',
-  'RESEND_API_KEY',
-  'OWNER_EMAIL'
-];
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
-if (missingEnvVars.length > 0) {
-  console.error('❌ Missing required environment variables:', missingEnvVars);
-  process.exit(1);
-}
-
-// ===================================
-// RESEND EMAIL CLIENT INITIALIZATION
-// ===================================
-const resend = new Resend(process.env.RESEND_API_KEY);
-
-// Default sender email - IMPORTANT: Change this after domain verification
-const MAIL_FROM = process.env.MAIL_FROM || 'FortuneHub <onboarding@resend.dev>';
-
-// ===================================
+// ================================================================
 // MONGODB CONNECTION
-// ===================================
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => {
-  console.log('🔗 Mongoose connected to MongoDB');
-  console.log('✅ MongoDB Connected Successfully');
-  console.log('📊 Database:', mongoose.connection.db.databaseName);
-})
-.catch((err) => {
-  console.error('❌ MongoDB connection error:', err);
+// ================================================================
+if (!process.env.MONGODB_URI) {
+  console.error('❌ MONGODB_URI is not set. Please configure MongoDB Atlas connection string.');
   process.exit(1);
+}
+
+const DB_NAME = process.env.MONGODB_DB_NAME || 'fortunehub';
+
+let db;
+let ordersCollection;
+let transactionsCollection;
+
+const mongoClient = new MongoClient(process.env.MONGODB_URI, {
+  serverSelectionTimeoutMS: 10000,
+  socketTimeoutMS: 45000,
+  connectTimeoutMS: 10000,
+  maxPoolSize: 50,
+  minPoolSize: 5,
+  retryWrites: true,
+  w: 'majority'
 });
 
-// ===================================
-// MONGOOSE SCHEMA & MODEL
-// ===================================
-const paymentSchema = new mongoose.Schema({
-  email: {
-    type: String,
-    required: true,
-    trim: true,
-    lowercase: true
-  },
-  amount: {
-    type: Number,
-    required: true
-  },
-  currency: {
-    type: String,
-    required: true,
-    default: 'NGN'
-  },
-  reference: {
-    type: String,
-    required: true,
-    unique: true
-  },
-  status: {
-    type: String,
-    required: true,
-    enum: ['success', 'failed', 'pending'],
-    default: 'pending'
-  },
-  paymentMethod: {
-    type: String,
-    default: 'paystack'
-  },
-  metadata: {
-    type: mongoose.Schema.Types.Mixed,
-    default: {}
-  },
-  emailSent: {
-    type: Boolean,
-    default: false
-  },
-  emailSentAt: {
-    type: Date
-  },
-  emailError: {
-    type: String
+async function connectToDatabase() {
+  let retries = 0;
+  const maxRetries = 5;
+
+  while (retries < maxRetries) {
+    try {
+      console.log(`🔄 Connecting to MongoDB Atlas... (Attempt ${retries + 1}/${maxRetries})`);
+      await mongoClient.connect();
+
+      // Ping test
+      await mongoClient.db('admin').admin().ping();
+      console.log('✅ Connected to MongoDB Atlas successfully!');
+
+      db = mongoClient.db(DB_NAME);
+      ordersCollection = db.collection('orders');
+      transactionsCollection = db.collection('transactions');
+
+      // Indexes (safe to run repeatedly; Mongo handles it)
+      await ordersCollection.createIndex({ order_reference: 1 }, { unique: true });
+      await ordersCollection.createIndex({ customer_email: 1 });
+      await ordersCollection.createIndex({ created_at: -1 });
+      await ordersCollection.createIndex({ payment_status: 1 });
+
+      await transactionsCollection.createIndex({ userId: 1, createdAt: -1 });
+      await transactionsCollection.createIndex({ reference: 1 }, { unique: true, sparse: true });
+      await transactionsCollection.createIndex({ status: 1 });
+
+      console.log('✅ Database indexes created successfully');
+      return true;
+    } catch (error) {
+      retries++;
+      console.error(`❌ MongoDB connection error (Attempt ${retries}/${maxRetries}):`, error.message);
+
+      if (retries >= maxRetries) {
+        console.error('❌ Failed to connect after maximum retries');
+        throw error;
+      }
+
+      console.log('🔄 Retrying in 5 seconds...');
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
   }
-}, {
-  timestamps: true
+}
+
+async function closeMongo() {
+  try {
+    await mongoClient.close();
+    console.log('✅ MongoDB connection closed');
+  } catch (e) {
+    console.error('❌ Error closing MongoDB connection:', e.message);
+  }
+}
+
+process.on('SIGINT', async () => {
+  console.log('🛑 SIGINT received, shutting down gracefully...');
+  await closeMongo();
+  process.exit(0);
 });
 
-const Payment = mongoose.model('Payment', paymentSchema);
+process.on('SIGTERM', async () => {
+  console.log('🛑 SIGTERM received, shutting down gracefully...');
+  await closeMongo();
+  process.exit(0);
+});
 
-// ===================================
-// EMAIL TEMPLATES
-// ===================================
-function getCustomerEmailTemplate(email, amount, reference) {
-  const amountInNaira = (amount / 100).toFixed(2);
-  
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Payment Confirmation</title>
-</head>
-<body style="margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #f4f4f4;">
-  <table role="presentation" style="width: 100%; border-collapse: collapse;">
-    <tr>
-      <td style="padding: 40px 0; text-align: center;">
-        <table role="presentation" style="width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-          <!-- Header -->
-          <tr>
-            <td style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px; text-align: center;">
-              <h1 style="color: #ffffff; margin: 0; font-size: 28px;">🎉 Payment Successful!</h1>
-            </td>
-          </tr>
-          
-          <!-- Content -->
-          <tr>
-            <td style="padding: 40px 30px;">
-              <p style="color: #333333; font-size: 16px; line-height: 1.6; margin: 0 0 20px;">
-                Dear Customer,
-              </p>
-              
-              <p style="color: #333333; font-size: 16px; line-height: 1.6; margin: 0 0 30px;">
-                Thank you for your payment! We've successfully received your transaction.
-              </p>
-              
-              <!-- Payment Details Box -->
-              <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px;">
-                <tr>
-                  <td style="background-color: #f8f9fa; border-radius: 8px; padding: 25px;">
-                    <h2 style="color: #667eea; margin: 0 0 20px; font-size: 20px;">Payment Details</h2>
-                    
-                    <table role="presentation" style="width: 100%; border-collapse: collapse;">
-                      <tr>
-                        <td style="padding: 8px 0; color: #666666; font-size: 14px;">Amount Paid:</td>
-                        <td style="padding: 8px 0; color: #333333; font-size: 16px; font-weight: bold; text-align: right;">₦${amountInNaira}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 8px 0; color: #666666; font-size: 14px;">Reference:</td>
-                        <td style="padding: 8px 0; color: #333333; font-size: 14px; text-align: right; font-family: monospace;">${reference}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 8px 0; color: #666666; font-size: 14px;">Email:</td>
-                        <td style="padding: 8px 0; color: #333333; font-size: 14px; text-align: right;">${email}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 8px 0; color: #666666; font-size: 14px;">Date:</td>
-                        <td style="padding: 8px 0; color: #333333; font-size: 14px; text-align: right;">${new Date().toLocaleString()}</td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-              
-              <p style="color: #666666; font-size: 14px; line-height: 1.6; margin: 0;">
-                If you have any questions about this payment, please contact our support team.
-              </p>
-            </td>
-          </tr>
-          
-          <!-- Footer -->
-          <tr>
-            <td style="background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #e9ecef;">
-              <p style="color: #666666; font-size: 14px; margin: 0 0 10px;">
-                <strong>FortuneHub</strong>
-              </p>
-              <p style="color: #999999; font-size: 12px; margin: 0;">
-                This is an automated email. Please do not reply to this message.
-              </p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-  `;
+function requireDb(req, res, next) {
+  if (!db || !ordersCollection) {
+    return res.status(503).json({
+      error: 'Database not connected yet',
+      hint: 'Check Render logs + MongoDB Atlas connection string and network access'
+    });
+  }
+  next();
 }
 
-function getOwnerEmailTemplate(email, amount, reference) {
-  const amountInNaira = (amount / 100).toFixed(2);
-  
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>New Payment Received</title>
-</head>
-<body style="margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #f4f4f4;">
-  <table role="presentation" style="width: 100%; border-collapse: collapse;">
-    <tr>
-      <td style="padding: 40px 0; text-align: center;">
-        <table role="presentation" style="width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-          <!-- Header -->
-          <tr>
-            <td style="background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); padding: 40px; text-align: center;">
-              <h1 style="color: #ffffff; margin: 0; font-size: 28px;">💰 New Payment Received</h1>
-            </td>
-          </tr>
-          
-          <!-- Content -->
-          <tr>
-            <td style="padding: 40px 30px;">
-              <p style="color: #333333; font-size: 16px; line-height: 1.6; margin: 0 0 20px;">
-                Hello Admin,
-              </p>
-              
-              <p style="color: #333333; font-size: 16px; line-height: 1.6; margin: 0 0 30px;">
-                You've received a new payment through FortuneHub!
-              </p>
-              
-              <!-- Payment Details Box -->
-              <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 0 0 30px;">
-                <tr>
-                  <td style="background-color: #f8f9fa; border-radius: 8px; padding: 25px;">
-                    <h2 style="color: #11998e; margin: 0 0 20px; font-size: 20px;">Transaction Details</h2>
-                    
-                    <table role="presentation" style="width: 100%; border-collapse: collapse;">
-                      <tr>
-                        <td style="padding: 8px 0; color: #666666; font-size: 14px;">Customer Email:</td>
-                        <td style="padding: 8px 0; color: #333333; font-size: 14px; text-align: right; font-weight: bold;">${email}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 8px 0; color: #666666; font-size: 14px;">Amount:</td>
-                        <td style="padding: 8px 0; color: #11998e; font-size: 18px; text-align: right; font-weight: bold;">₦${amountInNaira}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 8px 0; color: #666666; font-size: 14px;">Reference:</td>
-                        <td style="padding: 8px 0; color: #333333; font-size: 14px; text-align: right; font-family: monospace;">${reference}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 8px 0; color: #666666; font-size: 14px;">Date:</td>
-                        <td style="padding: 8px 0; color: #333333; font-size: 14px; text-align: right;">${new Date().toLocaleString()}</td>
-                      </tr>
-                      <tr>
-                        <td style="padding: 8px 0; color: #666666; font-size: 14px;">Status:</td>
-                        <td style="padding: 8px 0; text-align: right;">
-                          <span style="background-color: #d4edda; color: #155724; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: bold;">SUCCESS</span>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-              
-              <p style="color: #666666; font-size: 14px; line-height: 1.6; margin: 0;">
-                A confirmation email has been sent to the customer automatically.
-              </p>
-            </td>
-          </tr>
-          
-          <!-- Footer -->
-          <tr>
-            <td style="background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #e9ecef;">
-              <p style="color: #666666; font-size: 14px; margin: 0 0 10px;">
-                <strong>FortuneHub Admin Panel</strong>
-              </p>
-              <p style="color: #999999; font-size: 12px; margin: 0;">
-                This is an automated notification from your payment system.
-              </p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-  `;
+// ================================================================
+// RESEND
+// ================================================================
+if (!process.env.RESEND_API_KEY) {
+  console.warn('⚠️ RESEND_API_KEY is not set. Emails will fail until configured.');
+}
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+
+const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+const OWNER_EMAIL = process.env.OWNER_EMAIL;
+
+// ================================================================
+// PAYSTACK
+// ================================================================
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+
+// ================================================================
+// BASIC AUTH (Admin)
+// ================================================================
+function basicAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Basic ')) {
+    res.setHeader('WWW-Authenticate', 'Basic realm="Admin Area"');
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  try {
+    const base64Credentials = authHeader.split(' ')[1];
+    const credentials = Buffer.from(base64Credentials, 'base64').toString('ascii');
+
+    // NOTE: avoid ":" in ADMIN_PASSWORD because this split uses ":" separator
+    const [username, password] = credentials.split(':');
+
+    const validUsername = process.env.ADMIN_USERNAME || 'admin';
+    const validPassword = process.env.ADMIN_PASSWORD || 'admin123';
+
+    if (username === validUsername && password === validPassword) return next();
+    return res.status(401).json({ error: 'Invalid credentials' });
+  } catch (error) {
+    return res.status(401).json({ error: 'Invalid authorization header' });
+  }
 }
 
-// ===================================
-// EMAIL SENDING FUNCTION - FIXED
-// ===================================
-async function sendPaymentEmails(email, amount, reference) {
-  console.log('📧 Starting email send process...');
-  console.log('📧 Customer email:', email);
-  console.log('📧 Owner email:', process.env.OWNER_EMAIL);
-  console.log('📧 Sender email:', MAIL_FROM);
-  
-  const results = {
-    customerEmail: { sent: false, error: null, id: null },
-    ownerEmail: { sent: false, error: null, id: null }
+// ================================================================
+// HELPERS
+// ================================================================
+function formatCurrency(amountInKobo) {
+  return `₦${(Number(amountInKobo) / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })}`;
+}
+
+function normalizeProducts(metadata) {
+  const p = metadata?.products ?? metadata?.product_names ?? metadata?.product ?? null;
+  if (Array.isArray(p)) return p;
+  if (p && typeof p === 'object') return [p];
+  if (typeof p === 'string' && p.trim()) {
+    return p.split(',').map(x => ({ name: x.trim() })).filter(x => x.name);
+  }
+  return [];
+}
+
+function normalizeCartItems(metadata) {
+  const c = metadata?.cart_items ?? null;
+  if (Array.isArray(c)) return c;
+  if (c && typeof c === 'object') return [c];
+  return [];
+}
+
+function paginate(total, page, limit) {
+  const totalPages = Math.ceil(total / limit) || 1;
+  return {
+    page,
+    limit,
+    totalPages,
+    hasNext: page < totalPages,
+    hasPrev: page > 1
   };
-
-  // Send customer email
-  try {
-    console.log('📤 Sending customer email...');
-    const customerResponse = await resend.emails.send({
-      from: MAIL_FROM,
-      to: email,
-      subject: '✅ Payment Confirmation - FortuneHub',
-      html: getCustomerEmailTemplate(email, amount, reference)
-    });
-
-    console.log('📧 Customer email response:', JSON.stringify(customerResponse, null, 2));
-    
-    if (customerResponse.data && customerResponse.data.id) {
-      results.customerEmail.sent = true;
-      results.customerEmail.id = customerResponse.data.id;
-      console.log('✅ Customer email sent successfully. ID:', customerResponse.data.id);
-    } else if (customerResponse.id) {
-      results.customerEmail.sent = true;
-      results.customerEmail.id = customerResponse.id;
-      console.log('✅ Customer email sent successfully. ID:', customerResponse.id);
-    } else {
-      console.warn('⚠️ Customer email sent but no ID returned:', customerResponse);
-      results.customerEmail.sent = true;
-      results.customerEmail.id = 'no-id-returned';
-    }
-  } catch (error) {
-    console.error('❌ Customer email failed:', error.message);
-    console.error('❌ Full error:', error);
-    results.customerEmail.error = error.message;
-  }
-
-  // Send owner notification email
-  try {
-    console.log('📤 Sending owner notification email...');
-    const ownerResponse = await resend.emails.send({
-      from: MAIL_FROM,
-      to: process.env.OWNER_EMAIL,
-      subject: '💰 New Payment Received - FortuneHub',
-      html: getOwnerEmailTemplate(email, amount, reference)
-    });
-
-    console.log('📧 Owner email response:', JSON.stringify(ownerResponse, null, 2));
-    
-    if (ownerResponse.data && ownerResponse.data.id) {
-      results.ownerEmail.sent = true;
-      results.ownerEmail.id = ownerResponse.data.id;
-      console.log('✅ Owner email sent successfully. ID:', ownerResponse.data.id);
-    } else if (ownerResponse.id) {
-      results.ownerEmail.sent = true;
-      results.ownerEmail.id = ownerResponse.id;
-      console.log('✅ Owner email sent successfully. ID:', ownerResponse.id);
-    } else {
-      console.warn('⚠️ Owner email sent but no ID returned:', ownerResponse);
-      results.ownerEmail.sent = true;
-      results.ownerEmail.id = 'no-id-returned';
-    }
-  } catch (error) {
-    console.error('❌ Owner email failed:', error.message);
-    console.error('❌ Full error:', error);
-    results.ownerEmail.error = error.message;
-  }
-
-  return results;
 }
 
-// ===================================
-// ROUTES
-// ===================================
-
-// Health check
+// ================================================================
+// HEALTHCHECK
+// ================================================================
 app.get('/', (req, res) => {
   res.json({
-    status: 'success',
-    message: 'FortuneHub Backend API is running',
+    status: 'online',
+    service: 'FortuneHub E-Commerce API',
+    version: '2.0.1',
     timestamp: new Date().toISOString(),
-    endpoints: {
-      verifyPayment: 'POST /api/verify-payment',
-      payments: 'GET /api/payments',
-      health: 'GET /api/health'
-    }
+    database: db ? '✅ MongoDB Connected' : '❌ MongoDB Disconnected',
+    email: resend ? '✅ Resend Configured' : '⚠️ Resend Not Configured',
+    payment: PAYSTACK_SECRET_KEY ? '✅ Paystack Configured' : '⚠️ Paystack Not Configured',
+    environment: process.env.NODE_ENV || 'development'
   });
 });
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    uptime: process.uptime()
-  });
-});
-
-// Get all payments (optional - for admin dashboard)
-app.get('/api/payments', async (req, res) => {
+app.get('/health', async (req, res) => {
   try {
-    const payments = await Payment.find()
-      .sort({ createdAt: -1 })
-      .limit(100);
-    
+    const dbHealth = db ? await db.admin().ping() : null;
+
     res.json({
-      status: 'success',
-      count: payments.length,
-      data: payments
+      status: 'healthy',
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+      database: dbHealth ? 'connected' : 'disconnected',
+      memory: {
+        used: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
+        total: `${Math.round(process.memoryUsage().heapTotal / 1024 / 1024)}MB`
+      }
     });
   } catch (error) {
-    console.error('❌ Error fetching payments:', error);
-    res.status(500).json({
-      status: 'error',
-      message: 'Failed to fetch payments'
-    });
+    res.status(503).json({ status: 'unhealthy', error: error.message });
   }
 });
 
-// Verify payment endpoint - MAIN ROUTE
-app.post('/api/verify-payment', async (req, res) => {
-  const { reference } = req.body;
-
-  console.log('🔍 Verifying payment:', reference);
-  console.log('🌐 Request origin:', req.headers.origin);
-  console.log('📥 Request method:', req.method);
-
-  if (!reference) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'Payment reference is required'
-    });
-  }
+// ================================================================
+// VERIFY PAYMENT + CREATE ORDER
+// ================================================================
+app.post('/api/verify-payment', requireDb, async (req, res) => {
+  console.log('📨 Payment verification request received');
 
   try {
-    // 1. Check if payment already exists in database
-    const existingPayment = await Payment.findOne({ reference });
-    if (existingPayment) {
-      console.log('⚠️ Payment already verified:', reference);
-      return res.json({
-        status: 'success',
-        message: 'Payment already verified',
-        data: existingPayment
-      });
-    }
+    const { reference } = req.body;
+    if (!reference) return res.status(400).json({ error: 'Payment reference is required' });
+    if (!PAYSTACK_SECRET_KEY) return res.status(500).json({ error: 'PAYSTACK_SECRET_KEY is not configured' });
 
-    // 2. Verify with Paystack
-    console.log('📡 Calling Paystack verify endpoint...');
+    console.log('🔍 Verifying payment reference:', reference);
+
     const paystackResponse = await axios.get(
       `https://api.paystack.co/transaction/verify/${reference}`,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-          'Content-Type': 'application/json'
-        }
-      }
+      { headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` } }
     );
 
-    console.log('📦 Paystack response status:', paystackResponse.data.status);
-    console.log('📦 Paystack payment status:', paystackResponse.data.data.status);
-
-    const { data } = paystackResponse.data;
-
-    if (data.status !== 'success') {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Payment verification failed',
-        paymentStatus: data.status
-      });
+    const paymentData = paystackResponse.data?.data;
+    if (!paymentData) return res.status(500).json({ error: 'Invalid Paystack response (no data)' });
+    if (paymentData.status !== 'success') {
+      return res.status(400).json({ error: 'Payment verification failed', status: paymentData.status });
     }
 
-    // 3. Extract payment details
-    const amountInKobo = data.amount;
-    const amountInNaira = amountInKobo / 100;
-    const customerEmail = data.customer.email;
-    const currency = data.currency;
+    const metadata = paymentData.metadata || {};
+    const customFields = Array.isArray(metadata.custom_fields) ? metadata.custom_fields : [];
 
-    console.log('💰 Payment details:', {
-      email: customerEmail,
-      amountNaira: amountInNaira,
-      currency: currency
-    });
+    const getCustomField = (key) => {
+      const f = customFields.find(x => x?.variable_name === key || x?.display_name === key);
+      return f?.value;
+    };
 
-    // 4. Save to database
-    const payment = new Payment({
-      email: customerEmail,
-      amount: amountInKobo,
-      currency: currency,
-      reference: reference,
-      status: data.status,
-      metadata: {
-        channel: data.channel,
-        cardType: data.authorization?.card_type,
-        bank: data.authorization?.bank,
-        transactionDate: data.transaction_date,
-        paidAt: data.paid_at
-      }
-    });
+    const customerName = metadata.customer_name || getCustomField('customer_name') || 'Unknown Customer';
+    const customerEmail =
+      metadata.customer_email ||
+      getCustomField('customer_email') ||
+      paymentData.customer?.email ||
+      'unknown@email';
 
-    const savedPayment = await payment.save();
-    console.log('💾 Payment saved to database:', savedPayment._id);
+    const customerPhone = metadata.customer_phone || getCustomField('customer_phone') || 'N/A';
+    const shippingState = metadata.shipping_state || getCustomField('shipping_state') || 'Unknown';
 
-    // 5. Send emails
-    const emailResults = await sendPaymentEmails(customerEmail, amountInKobo, reference);
+    const shippingFee = (metadata.shipping_fee ?? getCustomField('shipping_fee') ?? 0);
+    const shippingFeeNaira = parseInt(shippingFee, 10) || 0;
+    const shippingFeeKobo = shippingFeeNaira * 100;
 
-    // 6. Update payment record with email status
-    const emailsSent = emailResults.customerEmail.sent && emailResults.ownerEmail.sent;
-    const emailError = !emailsSent ? 
-      `Customer: ${emailResults.customerEmail.error || 'OK'}, Owner: ${emailResults.ownerEmail.error || 'OK'}` : 
-      null;
+    const totalAmount = Number(paymentData.amount || 0); // KOBO
+    const subtotal = totalAmount - shippingFeeKobo;
 
-    await Payment.findByIdAndUpdate(savedPayment._id, {
-      emailSent: emailsSent,
-      emailSentAt: emailsSent ? new Date() : null,
-      emailError: emailError
-    });
+    const products = normalizeProducts(metadata) || normalizeProducts({ products: getCustomField('products') }) || [];
+    const cartItems = normalizeCartItems(metadata) || normalizeCartItems({ cart_items: getCustomField('cart_items') }) || [];
 
-    console.log('📧 Email results:', emailResults);
+    console.log('💾 Saving order to MongoDB...');
+    console.log('📧 Customer Email extracted:', customerEmail);
 
-    // 7. Send response
+    const orderData = {
+      order_reference: reference,
+      customer_name: customerName,
+      customer_email: customerEmail,
+      customer_phone: customerPhone,
+      shipping_state: shippingState,
+      shipping_fee: shippingFeeNaira,
+      subtotal,
+      total_amount: totalAmount,
+      products,
+      cart_items: cartItems,
+      payment_status: 'success',
+      created_at: new Date(),
+      updated_at: new Date()
+    };
+
+    const insertResult = await ordersCollection.insertOne(orderData);
+    const orderId = insertResult.insertedId;
+
+    // Send emails async (don't block response)
+    sendOrderEmail({
+      orderReference: reference,
+      customerName,
+      customerEmail,
+      customerPhone,
+      shippingState,
+      shippingFee: shippingFeeNaira,
+      subtotal,
+      totalAmount,
+      products,
+      cartItems
+    }).catch(err => console.error('❌ Email send failed:', err.message));
+
     return res.json({
-      status: 'success',
-      message: 'Payment verified successfully',
-      data: {
-        payment: savedPayment,
-        emailStatus: {
-          customerEmailSent: emailResults.customerEmail.sent,
-          ownerEmailSent: emailResults.ownerEmail.sent,
-          customerEmailId: emailResults.customerEmail.id,
-          ownerEmailId: emailResults.ownerEmail.id
-        }
+      success: true,
+      message: 'Payment verified and order saved successfully! Emails are being sent.',
+      reference,
+      orderId: orderId.toString()
+    });
+  } catch (error) {
+    console.error('❌ Verification error:', error?.response?.data || error.message);
+    return res.status(500).json({
+      error: 'Payment verification failed',
+      details: error?.response?.data || error.message
+    });
+  }
+});
+
+// ================================================================
+// EMAIL SENDING (RESEND) - WITH PRODUCT IMAGES
+// ================================================================
+async function sendOrderEmail(orderData) {
+  const {
+    orderReference,
+    customerName,
+    customerEmail,
+    customerPhone,
+    shippingState,
+    shippingFee,
+    subtotal,
+    totalAmount,
+    products,
+    cartItems
+  } = orderData;
+
+  if (!resend || !RESEND_FROM_EMAIL) {
+    console.warn('⚠️ Resend not configured. Skipping email sending.');
+    return;
+  }
+
+  const cleanPhone = String(customerPhone || '').trim();
+  const whatsappNumber = cleanPhone && cleanPhone !== 'N/A'
+    ? cleanPhone.replace(/^0/, '234').replace(/[^\d]/g, '')
+    : '';
+  const whatsappLink = whatsappNumber ? `https://wa.me/${whatsappNumber}` : '#';
+
+  const items = Array.isArray(cartItems) ? cartItems : [];
+  
+  // Build cart items HTML with product images
+  const cartItemsHtml = items.length
+    ? items.map((item) => {
+      const name = item?.name || 'Item';
+      const qty = Number(item?.quantity || 1);
+      const priceKobo = Number(item?.price || 0);
+      const imageUrl = item?.image || item?.imageUrl || '';
+      
+      // Image cell with fallback
+      const imageCell = imageUrl 
+        ? `<img src="${imageUrl}" alt="${name}" style="width: 80px; height: 80px; object-fit: cover; border-radius: 8px; border: 1px solid #e0e0e0;" />`
+        : `<div style="width: 80px; height: 80px; background: #f5f5f5; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #999; font-size: 12px;">No Image</div>`;
+      
+      return `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #eee;">${imageCell}</td>
+          <td style="padding: 10px; border-bottom: 1px solid #eee;">${name}</td>
+          <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: center;">${qty}</td>
+          <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">${formatCurrency(priceKobo)}</td>
+          <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">${formatCurrency(priceKobo * qty)}</td>
+        </tr>
+      `;
+    }).join('')
+    : `
+      <tr>
+        <td colspan="5" style="padding: 10px; text-align:center; color:#666;">
+          (No cart items received)
+        </td>
+      </tr>
+    `;
+
+  const productsList = Array.isArray(products) && products.length
+    ? `<ul>${products.map(p => `<li>${p?.name || JSON.stringify(p)}</li>`).join('')}</ul>`
+    : `<p style="color:#666;">No products field provided.</p>`;
+
+  const ownerEmailHtml = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color:#333;">
+      <h2>🎉 New Order Received!</h2>
+      <p><strong>Order Reference:</strong> ${orderReference}</p>
+      <p><strong>Date:</strong> ${new Date().toLocaleString()}</p>
+
+      <h3>👤 Customer Details</h3>
+      <p><strong>Name:</strong> ${customerName}</p>
+      <p><strong>Email:</strong> ${customerEmail}</p>
+      <p><strong>Phone:</strong> ${customerPhone}</p>
+      <p><strong>Shipping State:</strong> ${shippingState}</p>
+
+      <h3>🧾 Products (JSON)</h3>
+      ${productsList}
+
+      <h3>🛒 Cart Items</h3>
+      <table style="width:100%; border-collapse: collapse;">
+        <thead>
+          <tr style="background:#f5f5f5;">
+            <th style="padding:10px; text-align:left;">Image</th>
+            <th style="padding:10px; text-align:left;">Product</th>
+            <th style="padding:10px; text-align:center;">Qty</th>
+            <th style="padding:10px; text-align:right;">Price</th>
+            <th style="padding:10px; text-align:right;">Total</th>
+          </tr>
+        </thead>
+        <tbody>${cartItemsHtml}</tbody>
+      </table>
+
+      <p><strong>Subtotal:</strong> ${formatCurrency(subtotal)}</p>
+      <p><strong>Shipping Fee:</strong> ₦${Number(shippingFee).toLocaleString('en-NG', { minimumFractionDigits: 2 })}</p>
+      <p style="font-size:18px;"><strong>TOTAL PAID:</strong> ${formatCurrency(totalAmount)}</p>
+
+      <p>
+        <a href="${whatsappLink}" style="display:inline-block; padding:12px 18px; background:#25D366; color:#fff; text-decoration:none; border-radius:6px;">
+          💬 Contact Customer via WhatsApp
+        </a>
+      </p>
+    </div>
+  `;
+
+  const customerEmailHtml = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color:#333; max-width:600px; margin:0 auto;">
+      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
+        <h1 style="color: white; margin: 0;">✅ Order Confirmed!</h1>
+      </div>
+
+      <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
+        <p style="font-size: 16px;">Hi <strong>${customerName}</strong>,</p>
+        <p>Thank you for your purchase! Your payment was successful and your order is being processed.</p>
+
+        <div style="background: white; padding: 20px; border-radius: 8px; margin: 20px 0;">
+          <p><strong>Order Reference:</strong> <code style="background:#e3e3e3; padding:4px 8px; border-radius:4px;">${orderReference}</code></p>
+          <p><strong>Date:</strong> ${new Date().toLocaleString('en-NG')}</p>
+        </div>
+
+        <h3>🧾 Your Items</h3>
+        <table style="width:100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden;">
+          <thead>
+            <tr style="background:#667eea; color:#fff;">
+              <th style="padding:12px; text-align:left;">Image</th>
+              <th style="padding:12px; text-align:left;">Product</th>
+              <th style="padding:12px; text-align:center;">Qty</th>
+              <th style="padding:12px; text-align:right;">Price</th>
+              <th style="padding:12px; text-align:right;">Total</th>
+            </tr>
+          </thead>
+          <tbody>${cartItemsHtml}</tbody>
+        </table>
+
+        <div style="background: white; padding: 20px; border-radius: 8px; margin: 20px 0;">
+          <p><strong>Subtotal:</strong> ${formatCurrency(subtotal)}</p>
+          <p><strong>Shipping Fee (${shippingState}):</strong> ₦${Number(shippingFee).toLocaleString('en-NG', { minimumFractionDigits: 2 })}</p>
+          <p style="font-size:20px; color:#667eea;"><strong>TOTAL PAID:</strong> ${formatCurrency(totalAmount)}</p>
+        </div>
+
+        <p style="color:#666; font-size:12px; margin-top:30px; padding-top:20px; border-top: 1px solid #ddd;">
+          Need help? Reply to this email.<br>
+          Order Reference: ${orderReference}
+        </p>
+      </div>
+    </div>
+  `;
+
+  // OWNER
+  if (OWNER_EMAIL) {
+    await resend.emails.send({
+      from: RESEND_FROM_EMAIL,
+      to: OWNER_EMAIL,
+      subject: `🛒 New Order - ${orderReference} - ${customerName}`,
+      html: ownerEmailHtml
+    });
+    console.log('✅ Owner email sent via Resend!');
+  } else {
+    console.warn('⚠️ OWNER_EMAIL not configured, skipping owner notification.');
+  }
+
+  // CUSTOMER
+  if (customerEmail && customerEmail !== 'unknown@email') {
+    await resend.emails.send({
+      from: RESEND_FROM_EMAIL,
+      to: customerEmail,
+      subject: `✅ Order Confirmation - ${orderReference} - FortuneHub`,
+      html: customerEmailHtml
+    });
+    console.log('✅ Customer email sent via Resend!');
+  } else {
+    console.warn('⚠️ Invalid customer email, skipping customer confirmation.');
+  }
+}
+
+// ================================================================
+// PUBLIC: GET ORDERS
+// ================================================================
+app.get('/api/orders', requireDb, async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const skip = (page - 1) * limit;
+
+    const query = {};
+    if (req.query.email) query.customer_email = req.query.email;
+    if (req.query.status) query.payment_status = req.query.status;
+
+    const [orders, total] = await Promise.all([
+      ordersCollection.find(query).sort({ created_at: -1 }).skip(skip).limit(limit).toArray(),
+      ordersCollection.countDocuments(query)
+    ]);
+
+    return res.json({
+      success: true,
+      count: orders.length,
+      total,
+      pagination: paginate(total, page, limit),
+      orders
+    });
+  } catch (error) {
+    console.error('❌ Error fetching orders:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch orders' });
+  }
+});
+
+// ================================================================
+// PUBLIC: GET ORDER BY REFERENCE
+// ================================================================
+app.get('/api/orders/:reference', requireDb, async (req, res) => {
+  try {
+    const { reference } = req.params;
+    const order = await ordersCollection.findOne({ order_reference: reference });
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    return res.json({ success: true, order });
+  } catch (error) {
+    console.error('❌ Error fetching order:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch order' });
+  }
+});
+
+// ================================================================
+// ADMIN: GET ALL ORDERS
+// ================================================================
+app.get('/api/admin/orders', requireDb, basicAuth, async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const skip = (page - 1) * limit;
+
+    const query = {};
+    if (req.query.status) query.payment_status = req.query.status;
+    if (req.query.email) query.customer_email = new RegExp(req.query.email, 'i');
+    if (req.query.search) {
+      query.$or = [
+        { customer_name: new RegExp(req.query.search, 'i') },
+        { customer_email: new RegExp(req.query.search, 'i') },
+        { order_reference: new RegExp(req.query.search, 'i') }
+      ];
+    }
+
+    const [orders, total] = await Promise.all([
+      ordersCollection.find(query).sort({ created_at: -1 }).skip(skip).limit(limit).toArray(),
+      ordersCollection.countDocuments(query)
+    ]);
+
+    return res.json({
+      success: true,
+      count: orders.length,
+      total,
+      pagination: paginate(total, page, limit),
+      orders
+    });
+  } catch (error) {
+    console.error('❌ Error fetching admin orders:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch orders' });
+  }
+});
+
+// ================================================================
+// ADMIN: STATS
+// ================================================================
+app.get('/api/admin/stats', requireDb, basicAuth, async (req, res) => {
+  try {
+    const [totalOrders, successfulOrders, totalRevenueArr, todayOrders] = await Promise.all([
+      ordersCollection.countDocuments(),
+      ordersCollection.countDocuments({ payment_status: 'success' }),
+      ordersCollection.aggregate([
+        { $match: { payment_status: 'success' } },
+        { $group: { _id: null, total: { $sum: '$total_amount' } } }
+      ]).toArray(),
+      ordersCollection.countDocuments({
+        created_at: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) }
+      })
+    ]);
+
+    const totalRevenue = totalRevenueArr[0]?.total || 0;
+
+    return res.json({
+      success: true,
+      stats: {
+        totalOrders,
+        successfulOrders,
+        totalRevenue,
+        todayOrders,
+        revenueFormatted: formatCurrency(totalRevenue)
       }
     });
-
   } catch (error) {
-    console.error('❌ Payment verification error:', error.message);
-    console.error('❌ Full error:', error);
-    
-    return res.status(500).json({
-      status: 'error',
-      message: 'Payment verification failed',
-      error: error.message
-    });
+    console.error('❌ Error fetching stats:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch statistics' });
   }
 });
 
-// ===================================
-// ERROR HANDLERS
-// ===================================
-app.use((req, res) => {
-  res.status(404).json({
-    status: 'error',
-    message: 'Route not found'
-  });
-});
-
-app.use((err, req, res, next) => {
-  console.error('❌ Unhandled error:', err);
-  res.status(500).json({
-    status: 'error',
-    message: 'Internal server error',
-    error: process.env.NODE_ENV === 'development' ? err.message : undefined
-  });
-});
-
-// ===================================
-// START SERVER
-// ===================================
-const server = app.listen(PORT, () => {
-  console.log('\n🚀 ================================');
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log('🚀 ================================');
-  console.log('📊 Environment:', process.env.NODE_ENV || 'development');
-  console.log('📧 Resend API Key:', process.env.RESEND_API_KEY ? '✅ Configured' : '❌ Missing');
-  console.log('✉️  MAIL_FROM:', MAIL_FROM);
-  console.log('📮 Owner Email:', process.env.OWNER_EMAIL ? `✅ ${process.env.OWNER_EMAIL}` : '❌ Missing');
-  console.log('🗄️  MongoDB URI:', process.env.MONGODB_URI ? '✅ Configured' : '❌ Missing');
-  console.log('💳 Paystack Secret:', process.env.PAYSTACK_SECRET_KEY ? '✅ Configured' : '❌ Missing');
-  
-  if (MAIL_FROM.includes('onboarding@resend.dev')) {
-    console.log('⚠️  Resend sender is set to onboarding@resend.dev.');
-    console.log('⚠️  If customers are not receiving emails, verify a domain in Resend and set MAIL_FROM.');
-  }
-  
-  console.log('🚀 ================================\n');
-});
-
-// ===================================
-// GRACEFUL SHUTDOWN - FIXED
-// ===================================
-const gracefulExit = async () => {
-  console.log('\n👋 SIGTERM signal received: closing HTTP server');
-  
-  server.close(() => {
-    console.log('🔌 HTTP server closed');
-  });
-
+// ================================================================
+// ADMIN: DELETE ORDER
+// ================================================================
+app.delete('/api/admin/orders/:id', requireDb, basicAuth, async (req, res) => {
   try {
-    // FIXED: Remove callback parameter - use promise instead
-    await mongoose.connection.close();
-    console.log('🔌 MongoDB connection closed');
-    process.exit(0);
-  } catch (err) {
-    console.error('❌ Error closing MongoDB connection:', err);
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid order ID' });
+
+    const result = await ordersCollection.deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0) return res.status(404).json({ error: 'Order not found' });
+
+    return res.json({ success: true, message: 'Order deleted successfully' });
+  } catch (error) {
+    console.error('❌ Error deleting order:', error.message);
+    return res.status(500).json({ error: 'Failed to delete order' });
+  }
+});
+
+// ================================================================
+// 404
+// ================================================================
+app.use((req, res) => {
+  res.status(404).json({ error: 'Endpoint not found', path: req.path, method: req.method });
+});
+
+// ================================================================
+// START SERVER - FIXED TEMPLATE LITERAL
+// ================================================================
+async function startServer() {
+  try {
+    await connectToDatabase();
+
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log('='.repeat(60));
+      console.log('✅ FORTUNEHUB BACKEND SERVER STARTED SUCCESSFULLY!');
+      console.log('='.repeat(60));
+      console.log(`🌐 Server running on port: ${PORT}`);
+      console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`💾 Database: ${db ? 'Connected to MongoDB Atlas' : 'Disconnected'}`);
+      console.log(`📧 Email service: ${resend ? 'Resend Enabled' : 'Resend Disabled'}`);
+      console.log(`💳 Payment: ${PAYSTACK_SECRET_KEY ? 'Paystack Enabled' : 'Paystack Disabled'}`);
+      console.log('='.repeat(60));
+    });
+  } catch (error) {
+    console.error('❌ Failed to start server:', error.message);
     process.exit(1);
   }
-};
+}
 
-process.on('SIGTERM', gracefulExit);
-process.on('SIGINT', gracefulExit);
-
-// Handle uncaught exceptions
-process.on('uncaughtException', (error) => {
-  console.error('❌ Uncaught Exception:', error);
-  gracefulExit();
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-  gracefulExit();
-});
+startServer();
