@@ -551,6 +551,22 @@ app.get('/api/payments', async (req, res) => {
   }
 });
 
+// Admin: Clear all transactions (DELETE endpoint)
+app.delete('/api/admin/payments/clear-all', verifyAdmin, async (req, res) => {
+  try {
+    const result = await Payment.deleteMany({});
+    console.log(`✅ Cleared ${result.deletedCount} transaction(s) from database`);
+    res.json({ 
+      success: true, 
+      message: `Successfully cleared ${result.deletedCount} transaction(s)`,
+      deletedCount: result.deletedCount 
+    });
+  } catch (error) {
+    console.error('❌ Error clearing transactions:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // ===================================================
 // 8) UTILITY: Format currency (Naira)
 // ===================================================
