@@ -16,19 +16,12 @@ const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const OWNER_EMAIL = process.env.OWNER_EMAIL;
 
+// Admin credentials (you should change these in production)
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'fortunehub2026';
+
 // ---------------------------------------------------
 // ⚠️  SPAM / DOMAIN WARNING:
-// ---------------------------------------------------
-// Using `onboarding@resend.dev` (Resend test sender) causes emails to go
-// to SPAM for two reasons:
-//  1. It's a shared test domain — not your brand. Email clients distrust it.
-//  2. Resend restricts `onboarding@resend.dev` to only deliver to the
-//     verified account owner's email when in test/unverified mode.
-//     ANY other recipient gets silently blocked or spam-filed.
-//
-// ✅ FIX: Verify a custom domain in your Resend dashboard and set:
-//   MAIL_FROM="FortuneHub <no-reply@yourdomain.com>"
-//   in your Render environment variables.
 // ---------------------------------------------------
 const MAIL_FROM = process.env.MAIL_FROM || 'FortuneHub <onboarding@resend.dev>';
 
@@ -218,6 +211,7 @@ app.get('/', (req, res) => {
       verify:   '/api/payment/verify?reference=xxx',
       webhook:  '/api/payment/webhook/paystack',
       payments: '/api/payments',
+      admin:    '/api/admin/login',
       health:   '/health'
     }
   });
@@ -413,7 +407,141 @@ async function handlePaymentVerification(req, res) {
   }
 }
 
-// Admin: list last 50 payments
+// ===================================================
+// 7) ADMIN ROUTES - NEW
+// ===================================================
+
+// Admin login endpoint (simple authentication)
+app.post('/api/admin/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
+      // In production, use JWT tokens
+      return res.json({
+        success: true,
+        message: 'Login successful',
+        token: Buffer.from(`${username}:${password}`).toString('base64')
+      });
+    }
+
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid credentials'
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Middleware to verify admin authentication
+function verifyAdmin(req, res, next) {
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader) {
+    return res.status(401).json({ success: false, message: 'No authorization header' });
+  }
+
+  const token = authHeader.replace('Basic ', '');
+  const decoded = Buffer.from(token, 'base64').toString('utf-8');
+  const [username, password] = decoded.split(':');
+
+  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
+    next();
+  } else {
+    return res.status(401).json({ success: false, message: 'Unauthorized' });
+  }
+}
+
+// Get all payments with pagination and filters
+app.get('/api/admin/payments', verifyAdmin, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const status = req.query.status;
+    const search = req.query.search;
+    const startDate = req.query.startDate;
+    const endDate = req.query.endDate;
+
+    const query = {};
+
+    // Filter by status
+    if (status && status !== 'all') {
+      query.status = status;
+    }
+
+    // Search by reference or email
+    if (search) {
+      query.$or = [
+        { reference: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    // Filter by date range
+    if (startDate || endDate) {
+      query.createdAt = {};
+      if (startDate) query.createdAt.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        query.createdAt.$lte = end;
+      }
+    }
+
+    const total = await Payment.countDocuments(query);
+    const payments = await Payment.find(query)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .skip((page - 1) * limit);
+
+    // Calculate statistics
+    const stats = await Payment.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: null,
+          totalAmount: { $sum: '$amount' },
+          successCount: {
+            $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] }
+          },
+          pendingCount: {
+            $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] }
+          }
+        }
+      }
+    ]);
+
+    res.json({
+      success: true,
+      data: payments,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      },
+      stats: stats[0] || { totalAmount: 0, successCount: 0, pendingCount: 0 }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Get payment details by ID
+app.get('/api/admin/payments/:id', verifyAdmin, async (req, res) => {
+  try {
+    const payment = await Payment.findById(req.params.id);
+    if (!payment) {
+      return res.status(404).json({ success: false, message: 'Payment not found' });
+    }
+    res.json({ success: true, data: payment });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Admin: list last 50 payments (kept for backward compatibility)
 app.get('/api/payments', async (req, res) => {
   try {
     const payments = await Payment.find().sort({ createdAt: -1 }).limit(50);
@@ -424,7 +552,7 @@ app.get('/api/payments', async (req, res) => {
 });
 
 // ===================================================
-// 7) UTILITY: Format currency (Naira)
+// 8) UTILITY: Format currency (Naira)
 // ===================================================
 function formatNaira(amount) {
   return '₦' + Number(amount || 0).toLocaleString('en-NG', {
@@ -434,9 +562,7 @@ function formatNaira(amount) {
 }
 
 // ===================================================
-// 8) UTILITY: Format date in WAT (UTC+1, Africa/Lagos)
-//    Fix: Render servers run UTC. Without timezone option,
-//    dates show 1 hour behind Nigerian time.
+// 9) UTILITY: Format date in WAT (UTC+1, Africa/Lagos)
 // ===================================================
 function formatDateWAT(date) {
   return new Date(date).toLocaleString('en-NG', {
@@ -452,29 +578,7 @@ function formatDateWAT(date) {
 }
 
 // ===================================================
-// 9) EMAIL SENDER — RICH FULL-INFO TEMPLATE
-//
-// Parameters:
-//  toEmail     — customer email
-//  reference   — Paystack transaction reference
-//  amountNaira — total paid (naira)
-//  currency    — e.g. 'NGN'
-//  paidAt      — Date object / ISO string
-//  metadata    — Paystack metadata object (customer_name, cart_items,
-//                shipping_fee, shipping_state, customer_phone)
-//
-// NOTE: To include shipping_fee & shipping_state in the email you MUST
-// add them to Paystack metadata in your script.js:
-//
-//   metadata: {
-//     customer_name:  name,
-//     customer_email: email,
-//     customer_phone: phone,
-//     cart_items:     cart,
-//     shipping_fee:   shippingFeeNaira,                                  // ← ADD THIS
-//     shipping_state: shippingStateSelect.options[
-//                       shippingStateSelect.selectedIndex]?.text || ''   // ← ADD THIS
-//   }
+// 10) EMAIL SENDER — RICH FULL-INFO TEMPLATE
 // ===================================================
 async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, paidAt, metadata }) {
   if (!toEmail) throw new Error('Missing customer email');
@@ -825,7 +929,7 @@ async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, pai
 }
 
 // ===================================================
-// 10) START SERVER
+// 11) START SERVER
 // ===================================================
 app.listen(PORT, () => {
   console.log('');
@@ -838,6 +942,7 @@ app.listen(PORT, () => {
   console.log('📮 Owner Email:',     OWNER_EMAIL           ? `✅ ${OWNER_EMAIL}` : '❌ Missing');
   console.log('🗄️  MongoDB URI:',     MONGODB_URI           ? '✅ Configured' : '❌ Missing');
   console.log('💳 Paystack Secret:', PAYSTACK_SECRET_KEY   ? '✅ Configured' : '❌ Missing');
+  console.log('👤 Admin Username:',  ADMIN_USERNAME);
 
   if (MAIL_FROM.includes('@resend.dev') && !process.env.MAIL_FROM) {
     console.warn('');
