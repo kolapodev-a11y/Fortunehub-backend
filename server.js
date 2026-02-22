@@ -23,7 +23,8 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'fortunehub2026';
 // ---------------------------------------------------
 // ⚠️  SPAM / DOMAIN WARNING:
 // ---------------------------------------------------
-const MAIL_FROM = process.env.MAIL_FROM || 'FortuneHub <onboarding@resend.dev>';
+const MAIL_FROM = 'Fortunehub <hello@fortunehub.name.ng>';
+
 
 // Initialize Resend (safe even if key is missing; sending will fail with a clear message)
 const resend = new Resend(RESEND_API_KEY || '');
