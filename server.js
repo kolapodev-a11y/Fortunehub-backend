@@ -34,6 +34,9 @@ const resend = new Resend(RESEND_API_KEY || '');
 const corsOptions = {
   origin: [
     'https://kolapodev-a11y.github.io',
+    'https://fortunehub.name.ng',             // <--- Add this
+    'https://www.fortunehub.name.ng',         // <--- Add this
+    'https://fortunehub-frontend.vercel.app', // <--- Add this
     'http://localhost:3000',
     'http://localhost:5000',
     'http://127.0.0.1:5500',
