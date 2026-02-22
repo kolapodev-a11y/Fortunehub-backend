@@ -17,8 +17,8 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const OWNER_EMAIL = process.env.OWNER_EMAIL;
 
 // Admin credentials (you should change these in production)
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'fortunehub2026';
 
 // ---------------------------------------------------
 // ⚠️  SPAM / DOMAIN WARNING:
@@ -34,9 +34,6 @@ const resend = new Resend(RESEND_API_KEY || '');
 const corsOptions = {
   origin: [
     'https://kolapodev-a11y.github.io',
-    'https://fortunehub.name.ng',             // <--- Add this
-    'https://www.fortunehub.name.ng',         // <--- Add this
-    'https://fortunehub-frontend.vercel.app', // <--- Add this
     'http://localhost:3000',
     'http://localhost:5000',
     'http://127.0.0.1:5500',
