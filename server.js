@@ -572,6 +572,146 @@ app.delete('/api/admin/payments/clear-all', verifyAdmin, async (req, res) => {
 });
 
 // ===================================================
+
+// ===================================================
+// PRODUCT MANAGEMENT — INSERT AFTER SECTION 7 (Admin Routes)
+// in server.js — PASTE BEFORE the "8) UTILITY" section
+// ===================================================
+
+// ===================================================
+// 7b) PRODUCT MODEL
+// ===================================================
+const productSchema = new mongoose.Schema({
+  name:            { type: String, required: true },
+  price:           { type: Number, required: true },  // stored in KOBO (like products.json)
+  category:        { type: String, required: true },
+  description:     { type: String, default: '' },
+  image:           { type: String, default: '' },     // primary image (base64 or URL)
+  images:          [{ type: String }],                // array of up to 4 images
+  tag:             { type: String, default: 'none' }, // 'new' | 'sale' | 'none'
+  outOfStock:      { type: Boolean, default: false },
+  sold:            { type: Boolean, default: false },
+  statusIndicator: { type: String, default: 'available' },
+  createdAt:       { type: Date, default: Date.now }
+});
+
+const Product = mongoose.model('Product', productSchema);
+
+// ===================================================
+// 7c) PRODUCT ROUTES
+// ===================================================
+
+// GET all products (PUBLIC - used by frontend)
+app.get('/api/products', async (req, res) => {
+  try {
+    const dbProducts = await Product.find().sort({ createdAt: -1 });
+
+    // Map to same shape as products.json
+    const mapped = dbProducts.map((p, i) => ({
+      id:              `db_${p._id}`,
+      _id:             p._id,
+      name:            p.name,
+      price:           p.price,
+      category:        p.category,
+      description:     p.description,
+      image:           p.image,
+      images:          p.images && p.images.length ? p.images : [p.image, p.image, p.image],
+      tag:             p.tag,
+      outOfStock:      p.outOfStock,
+      sold:            p.sold,
+      statusIndicator: p.statusIndicator
+    }));
+
+    res.json({ success: true, count: mapped.length, data: mapped });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// GET single product by mongo _id (ADMIN)
+app.get('/api/products/:id', verifyAdmin, async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id);
+    if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
+    res.json({ success: true, data: product });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// POST create product (ADMIN) — images sent as base64 strings in JSON
+app.post('/api/products', verifyAdmin, async (req, res) => {
+  try {
+    const { name, price, category, description, image, images, tag, outOfStock, sold, statusIndicator } = req.body;
+
+    if (!name || !price || !category) {
+      return res.status(400).json({ success: false, message: 'name, price, and category are required' });
+    }
+
+    const product = new Product({
+      name,
+      price:           Number(price),
+      category:        category.toLowerCase(),
+      description:     description || '',
+      image:           image || '',
+      images:          Array.isArray(images) ? images : (image ? [image] : []),
+      tag:             tag || 'none',
+      outOfStock:      Boolean(outOfStock),
+      sold:            Boolean(sold),
+      statusIndicator: statusIndicator || 'available'
+    });
+
+    await product.save();
+    console.log(`✅ New product created: ${product.name} (${product._id})`);
+    res.status(201).json({ success: true, message: 'Product created successfully', data: product });
+  } catch (err) {
+    console.error('❌ Product create error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// PUT update product (ADMIN)
+app.put('/api/products/:id', verifyAdmin, async (req, res) => {
+  try {
+    const { name, price, category, description, image, images, tag, outOfStock, sold, statusIndicator } = req.body;
+
+    const updateData = {};
+    if (name            !== undefined) updateData.name            = name;
+    if (price           !== undefined) updateData.price           = Number(price);
+    if (category        !== undefined) updateData.category        = category.toLowerCase();
+    if (description     !== undefined) updateData.description     = description;
+    if (image           !== undefined) updateData.image           = image;
+    if (images          !== undefined) updateData.images          = Array.isArray(images) ? images : [image];
+    if (tag             !== undefined) updateData.tag             = tag;
+    if (outOfStock      !== undefined) updateData.outOfStock      = Boolean(outOfStock);
+    if (sold            !== undefined) updateData.sold            = Boolean(sold);
+    if (statusIndicator !== undefined) updateData.statusIndicator = statusIndicator;
+
+    const product = await Product.findByIdAndUpdate(req.params.id, updateData, { new: true });
+    if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
+
+    console.log(`✅ Product updated: ${product.name} (${product._id})`);
+    res.json({ success: true, message: 'Product updated successfully', data: product });
+  } catch (err) {
+    console.error('❌ Product update error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// DELETE product (ADMIN)
+app.delete('/api/products/:id', verifyAdmin, async (req, res) => {
+  try {
+    const product = await Product.findByIdAndDelete(req.params.id);
+    if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
+
+    console.log(`✅ Product deleted: ${product.name} (${product._id})`);
+    res.json({ success: true, message: `Product "${product.name}" deleted successfully` });
+  } catch (err) {
+    console.error('❌ Product delete error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // 8) UTILITY: Format currency (Naira)
 // ===================================================
 function formatNaira(amount) {
