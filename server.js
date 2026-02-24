@@ -574,20 +574,77 @@ app.delete('/api/admin/payments/clear-all', verifyAdmin, async (req, res) => {
 // ===================================================
 
 // ===================================================
-// PRODUCT MANAGEMENT — INSERT AFTER SECTION 7 (Admin Routes)
-// in server.js — PASTE BEFORE the "8) UTILITY" section
-// ===================================================
 
 // ===================================================
-// 7b) PRODUCT MODEL
+// PRODUCT MANAGEMENT (CLIENT CAN UPLOAD PRODUCTS + IMAGES)
 // ===================================================
+// ✅ Professional approach:
+// - Store products in MongoDB (not products.json)
+// - Client uses a simple Admin Dashboard (served by this backend) to add/edit/delete
+// - Images are uploaded to Cloudinary (recommended for production)
+//   so you don't need GitHub access for images.
+
+const path = require('path');
+const multer = require('multer');
+const cloudinary = require('cloudinary').v2;
+
+// ------------------------------
+// Cloudinary config (set these on Render)
+// ------------------------------
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+function cloudinaryConfigured() {
+  return Boolean(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+}
+
+// ------------------------------
+// Serve Admin Dashboard (no GitHub needed)
+// Visit: https://YOUR-BACKEND-DOMAIN/admin/
+// ------------------------------
+app.use('/admin', express.static(path.join(__dirname, 'admin')));
+
+// ------------------------------
+// Multer memory storage (uploads file buffers)
+// ------------------------------
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB per image
+  }
+});
+
+// ===================================================
+// 7b) PRODUCT + COUNTER MODELS
+// ===================================================
+
+// Counter collection for auto-increment numeric product IDs
+const counterSchema = new mongoose.Schema({
+  name: { type: String, required: true, unique: true },
+  value: { type: Number, default: 0 }
+});
+const Counter = mongoose.model('Counter', counterSchema);
+
+async function getNextSequence(name) {
+  const doc = await Counter.findOneAndUpdate(
+    { name },
+    { $inc: { value: 1 } },
+    { new: true, upsert: true }
+  );
+  return doc.value;
+}
+
 const productSchema = new mongoose.Schema({
+  id:              { type: Number, unique: true, index: true }, // IMPORTANT: frontend expects numeric id
   name:            { type: String, required: true },
-  price:           { type: Number, required: true },  // stored in KOBO (like products.json)
+  price:           { type: Number, required: true },  // stored in NAIRA
   category:        { type: String, required: true },
   description:     { type: String, default: '' },
-  image:           { type: String, default: '' },     // primary image (base64 or URL)
-  images:          [{ type: String }],                // array of up to 4 images
+  image:           { type: String, default: '' },     // primary image URL
+  images:          [{ type: String }],                // array of image URLs
   tag:             { type: String, default: 'none' }, // 'new' | 'sale' | 'none'
   outOfStock:      { type: Boolean, default: false },
   sold:            { type: Boolean, default: false },
@@ -598,71 +655,126 @@ const productSchema = new mongoose.Schema({
 const Product = mongoose.model('Product', productSchema);
 
 // ===================================================
-// 7c) PRODUCT ROUTES
+// 7c) HELPERS: Upload images to Cloudinary
 // ===================================================
+async function uploadBufferToCloudinary(buffer, folder = 'fortunehub/products') {
+  if (!cloudinaryConfigured()) {
+    throw new Error('Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET');
+  }
 
-// GET all products (PUBLIC - used by frontend)
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        resource_type: 'image',
+        transformation: [
+          { quality: 'auto' },
+          { fetch_format: 'auto' }
+        ]
+      },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result);
+      }
+    );
+    stream.end(buffer);
+  });
+}
+
+async function uploadImagesFromMulter(files) {
+  const urls = [];
+  for (const file of (files || [])) {
+    const uploaded = await uploadBufferToCloudinary(file.buffer);
+    if (uploaded?.secure_url) urls.push(uploaded.secure_url);
+  }
+  return urls;
+}
+
+function normalizeImages(primaryImage, imagesArray) {
+  const images = Array.isArray(imagesArray) ? imagesArray.filter(Boolean) : [];
+  if (primaryImage) {
+    if (!images.includes(primaryImage)) images.unshift(primaryImage);
+  }
+  const clean = images.filter(Boolean);
+  return {
+    image: clean[0] || primaryImage || '',
+    images: clean
+  };
+}
+
+// ===================================================
+// 7d) PUBLIC PRODUCT ROUTE (frontend uses this)
+// Returns ARRAY (same shape as products.json)
+// ===================================================
 app.get('/api/products', async (req, res) => {
   try {
-    const dbProducts = await Product.find().sort({ createdAt: -1 });
+    const dbProducts = await Product.find().sort({ id: 1 });
 
-    // Map to same shape as products.json
-    const mapped = dbProducts.map((p, i) => ({
-      id:              `db_${p._id}`,
-      _id:             p._id,
+    const mapped = dbProducts.map((p) => ({
+      id:              p.id,
       name:            p.name,
-      price:           p.price,
+      price:           p.price, // NAIRA
       category:        p.category,
       description:     p.description,
       image:           p.image,
-      images:          p.images && p.images.length ? p.images : [p.image, p.image, p.image],
+      images:          (p.images && p.images.length) ? p.images : (p.image ? [p.image] : []),
       tag:             p.tag,
       outOfStock:      p.outOfStock,
       sold:            p.sold,
       statusIndicator: p.statusIndicator
     }));
 
-    res.json({ success: true, count: mapped.length, data: mapped });
+    res.json(mapped);
+  } catch (err) {
+    res.status(500).json([]);
+  }
+});
+
+// ===================================================
+// 7e) ADMIN PRODUCT ROUTES
+// ===================================================
+
+// List products (ADMIN)
+app.get('/api/admin/products', verifyAdmin, async (req, res) => {
+  try {
+    const products = await Product.find().sort({ id: 1 });
+    res.json({ success: true, count: products.length, data: products });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// GET single product by mongo _id (ADMIN)
-app.get('/api/products/:id', verifyAdmin, async (req, res) => {
+// Create product (ADMIN) - multipart/form-data
+// Fields: name, price, category, description, tag, outOfStock, sold, statusIndicator
+// Files: images (up to 4)
+app.post('/api/admin/products', verifyAdmin, upload.array('images', 4), async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id);
-    if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
-    res.json({ success: true, data: product });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// POST create product (ADMIN) — images sent as base64 strings in JSON
-app.post('/api/products', verifyAdmin, async (req, res) => {
-  try {
-    const { name, price, category, description, image, images, tag, outOfStock, sold, statusIndicator } = req.body;
+    const { name, price, category, description, tag, outOfStock, sold, statusIndicator } = req.body;
 
     if (!name || !price || !category) {
       return res.status(400).json({ success: false, message: 'name, price, and category are required' });
     }
 
+    const uploadedUrls = await uploadImagesFromMulter(req.files);
+    const normalized = normalizeImages(uploadedUrls[0] || '', uploadedUrls);
+
+    const nextId = await getNextSequence('productId');
+
     const product = new Product({
-      name,
-      price:           Number(price),
-      category:        category.toLowerCase(),
-      description:     description || '',
-      image:           image || '',
-      images:          Array.isArray(images) ? images : (image ? [image] : []),
-      tag:             tag || 'none',
-      outOfStock:      Boolean(outOfStock),
-      sold:            Boolean(sold),
+      id: nextId,
+      name: String(name).trim(),
+      price: Number(price), // NAIRA
+      category: String(category).toLowerCase().trim(),
+      description: description ? String(description).trim() : '',
+      image: normalized.image,
+      images: normalized.images,
+      tag: tag || 'none',
+      outOfStock: String(outOfStock) === 'true',
+      sold: String(sold) === 'true',
       statusIndicator: statusIndicator || 'available'
     });
 
     await product.save();
-    console.log(`✅ New product created: ${product.name} (${product._id})`);
     res.status(201).json({ success: true, message: 'Product created successfully', data: product });
   } catch (err) {
     console.error('❌ Product create error:', err);
@@ -670,47 +782,112 @@ app.post('/api/products', verifyAdmin, async (req, res) => {
   }
 });
 
-// PUT update product (ADMIN)
-app.put('/api/products/:id', verifyAdmin, async (req, res) => {
+// Update product (ADMIN) - multipart/form-data
+// If new images are uploaded, they replace existing images.
+app.put('/api/admin/products/:id', verifyAdmin, upload.array('images', 4), async (req, res) => {
   try {
-    const { name, price, category, description, image, images, tag, outOfStock, sold, statusIndicator } = req.body;
-
-    const updateData = {};
-    if (name            !== undefined) updateData.name            = name;
-    if (price           !== undefined) updateData.price           = Number(price);
-    if (category        !== undefined) updateData.category        = category.toLowerCase();
-    if (description     !== undefined) updateData.description     = description;
-    if (image           !== undefined) updateData.image           = image;
-    if (images          !== undefined) updateData.images          = Array.isArray(images) ? images : [image];
-    if (tag             !== undefined) updateData.tag             = tag;
-    if (outOfStock      !== undefined) updateData.outOfStock      = Boolean(outOfStock);
-    if (sold            !== undefined) updateData.sold            = Boolean(sold);
-    if (statusIndicator !== undefined) updateData.statusIndicator = statusIndicator;
-
-    const product = await Product.findByIdAndUpdate(req.params.id, updateData, { new: true });
+    const product = await Product.findOne({ id: Number(req.params.id) });
     if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
 
-    console.log(`✅ Product updated: ${product.name} (${product._id})`);
-    res.json({ success: true, message: 'Product updated successfully', data: product });
+    const { name, price, category, description, tag, outOfStock, sold, statusIndicator } = req.body;
+
+    const updateData = {};
+    if (name !== undefined) updateData.name = String(name).trim();
+    if (price !== undefined) updateData.price = Number(price);
+    if (category !== undefined) updateData.category = String(category).toLowerCase().trim();
+    if (description !== undefined) updateData.description = String(description);
+    if (tag !== undefined) updateData.tag = tag;
+    if (outOfStock !== undefined) updateData.outOfStock = String(outOfStock) === 'true';
+    if (sold !== undefined) updateData.sold = String(sold) === 'true';
+    if (statusIndicator !== undefined) updateData.statusIndicator = statusIndicator;
+
+    if (req.files && req.files.length) {
+      const uploadedUrls = await uploadImagesFromMulter(req.files);
+      const normalized = normalizeImages(uploadedUrls[0] || '', uploadedUrls);
+      updateData.image = normalized.image;
+      updateData.images = normalized.images;
+    }
+
+    const updated = await Product.findOneAndUpdate({ id: product.id }, updateData, { new: true });
+    res.json({ success: true, message: 'Product updated successfully', data: updated });
   } catch (err) {
     console.error('❌ Product update error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// DELETE product (ADMIN)
-app.delete('/api/products/:id', verifyAdmin, async (req, res) => {
+// Delete product (ADMIN)
+app.delete('/api/admin/products/:id', verifyAdmin, async (req, res) => {
   try {
-    const product = await Product.findByIdAndDelete(req.params.id);
+    const product = await Product.findOneAndDelete({ id: Number(req.params.id) });
     if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
-
-    console.log(`✅ Product deleted: ${product.name} (${product._id})`);
     res.json({ success: true, message: `Product "${product.name}" deleted successfully` });
   } catch (err) {
     console.error('❌ Product delete error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
+// Import products from JSON (ADMIN)
+// Accepts body: { products: [...] }
+// If prices look like KOBO (very large), it auto-converts to NAIRA by dividing 100.
+app.post('/api/admin/products/import', verifyAdmin, async (req, res) => {
+  try {
+    const items = Array.isArray(req.body?.products) ? req.body.products : [];
+    if (!items.length) return res.status(400).json({ success: false, message: 'products array is required' });
+
+    let imported = 0;
+    let maxIncomingId = 0;
+
+    for (const item of items) {
+      const incomingId = Number(item.id);
+      if (!incomingId) continue;
+      if (incomingId > maxIncomingId) maxIncomingId = incomingId;
+
+      // Convert kobo -> naira if it looks like kobo
+      const rawPrice = Number(item.price || 0);
+      const priceNaira = rawPrice >= 1000000 ? Math.round(rawPrice / 100) : rawPrice;
+
+      const normalized = normalizeImages(item.image || '', Array.isArray(item.images) ? item.images : []);
+
+      await Product.findOneAndUpdate(
+        { id: incomingId },
+        {
+          id: incomingId,
+          name: item.name || 'Unnamed product',
+          price: priceNaira,
+          category: (item.category || 'others').toLowerCase(),
+          description: item.description || '',
+          image: normalized.image,
+          images: normalized.images,
+          tag: item.tag || 'none',
+          outOfStock: Boolean(item.outOfStock),
+          sold: Boolean(item.sold),
+          statusIndicator: item.statusIndicator || 'available'
+        },
+        { upsert: true, new: true }
+      );
+
+      imported += 1;
+    }
+
+    // Ensure counter is at least max incoming id
+    if (maxIncomingId > 0) {
+      await Counter.findOneAndUpdate(
+        { name: 'productId' },
+        { $max: { value: maxIncomingId } },
+        { upsert: true, new: true }
+      );
+    }
+
+    res.json({ success: true, message: `Imported ${imported} product(s)` });
+  } catch (err) {
+    console.error('❌ Import error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
 
 // 8) UTILITY: Format currency (Naira)
 // ===================================================
@@ -771,9 +948,8 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
   const shippingFee    = Number(metadata?.shipping_fee  || 0);   // naira
   const shippingState  = metadata?.shipping_state  || '';
 
-  // --- Subtotal from cart items (prices stored in KOBO in cart) ---
-  const subtotalKobo = cartItems.reduce((sum, item) => sum + (item.price || 0) * (item.quantity || 1), 0);
-  const subtotalNaira = subtotalKobo / 100;
+  // --- Subtotal from cart items (prices stored in NAIRA in cart) ---
+  const subtotalNaira = cartItems.reduce((sum, item) => sum + (Number(item.price) || 0) * (Number(item.quantity) || 1), 0);
 
   // --- If shipping_fee not in metadata, derive from total - subtotal ---
   const derivedShippingFee = shippingFee > 0
@@ -790,7 +966,7 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
   // --- Build items table rows with ABSOLUTE image URLs ---
   const itemsHTML = cartItems.length > 0
     ? cartItems.map(item => {
-        const itemPrice = Number(item.price || 0) / 100;  // kobo → naira
+        const itemPrice = Number(item.price || 0);  // naira
         const qty       = Number(item.quantity || 1);
         const lineTotal = itemPrice * qty;
         
