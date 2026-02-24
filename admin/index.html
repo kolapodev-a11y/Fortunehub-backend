@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FortuneHub Admin — Products</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">FH</div>
+      <div>
+        <div class="title">FortuneHub Admin</div>
+        <div class="subtitle">Manage products (MongoDB + Cloudinary)</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button id="logoutBtn" class="btn btn-ghost">Logout</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- LOGIN -->
+    <section id="loginSection" class="card">
+      <h2>Login</h2>
+      <p class="muted">Use your admin username and password (set in Render environment variables).</p>
+      <div class="grid2">
+        <label>
+          <span>Username</span>
+          <input id="username" placeholder="admin" autocomplete="username" />
+        </label>
+        <label>
+          <span>Password</span>
+          <input id="password" type="password" placeholder="••••••••" autocomplete="current-password" />
+        </label>
+      </div>
+      <div class="row">
+        <button id="loginBtn" class="btn">Login</button>
+        <span id="loginMsg" class="muted"></span>
+      </div>
+    </section>
+
+    <!-- APP -->
+    <section id="appSection" class="hidden">
+      <section class="card">
+        <div class="row space-between">
+          <div>
+            <h2>Products</h2>
+            <p class="muted">Add / edit / delete products. Prices are in <b>NAIRA (₦)</b>.</p>
+          </div>
+          <div class="row">
+            <button id="refreshBtn" class="btn btn-ghost">Refresh</button>
+            <button id="openCreateBtn" class="btn">+ New Product</button>
+          </div>
+        </div>
+
+        <div class="row wrap">
+          <div class="pill">Backend: <span id="backendUrl"></span></div>
+          <div class="pill">Cloudinary: <span id="cloudinaryStatus">Unknown</span></div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Image</th>
+                <th>Name</th>
+                <th>Category</th>
+                <th>Price (₦)</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="productsTbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3>Import from products.json (one-time)</h3>
+        <p class="muted">
+          Upload your existing <code>products.json</code>. The backend will store them in MongoDB.
+          If prices look like <b>kobo</b>, the import will auto-convert them to <b>naira</b> (÷100).
+        </p>
+        <div class="row wrap">
+          <input id="importFile" type="file" accept="application/json" />
+          <button id="importBtn" class="btn btn-ghost">Import</button>
+          <span id="importMsg" class="muted"></span>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <!-- MODAL -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="row space-between">
+        <h3 id="modalTitle">New Product</h3>
+        <button id="closeModal" class="btn btn-ghost">Close</button>
+      </div>
+
+      <div class="grid2">
+        <label>
+          <span>Name *</span>
+          <input id="pName" placeholder="Product name" />
+        </label>
+        <label>
+          <span>Category *</span>
+          <input id="pCategory" placeholder="phones / laptops / accessories" />
+        </label>
+
+        <label>
+          <span>Price (₦) *</span>
+          <input id="pPrice" type="number" step="1" placeholder="50000" />
+        </label>
+        <label>
+          <span>Tag</span>
+          <select id="pTag">
+            <option value="none">none</option>
+            <option value="new">new</option>
+            <option value="sale">sale</option>
+          </select>
+        </label>
+
+        <label class="span2">
+          <span>Description</span>
+          <textarea id="pDescription" rows="3" placeholder="Short description..."></textarea>
+        </label>
+
+        <label>
+          <span>Out of stock</span>
+          <select id="pOutOfStock">
+            <option value="false">No</option>
+            <option value="true">Yes</option>
+          </select>
+        </label>
+        <label>
+          <span>Sold</span>
+          <select id="pSold">
+            <option value="false">No</option>
+            <option value="true">Yes</option>
+          </select>
+        </label>
+
+        <label>
+          <span>Status indicator</span>
+          <select id="pStatus">
+            <option value="available">available</option>
+            <option value="new">new</option>
+            <option value="sale">sale</option>
+            <option value="outofstock">outofstock</option>
+          </select>
+        </label>
+
+        <label class="span2">
+          <span>Images (up to 4) *</span>
+          <input id="pImages" type="file" accept="image/*" multiple />
+          <small class="muted">Images upload to Cloudinary. If Cloudinary is not configured, uploads will fail.</small>
+        </label>
+      </div>
+
+      <div class="row space-between">
+        <span id="modalMsg" class="muted"></span>
+        <div class="row">
+          <button id="saveBtn" class="btn">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>
