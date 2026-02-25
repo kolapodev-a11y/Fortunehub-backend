@@ -6,6 +6,48 @@ const { Resend } = require('resend');
 require('dotenv').config();
 
 const app = express();
+const https = require('https');
+
+function paystackRequest(path, method, bodyObj = null) {
+  return new Promise((resolve, reject) => {
+    if (!process.env.PAYSTACK_SECRET_KEY) {
+      return reject(new Error('PAYSTACK_SECRET_KEY is missing'));
+    }
+
+    const body = bodyObj ? JSON.stringify(bodyObj) : null;
+
+    const req = https.request(
+      {
+        hostname: 'api.paystack.co',
+        path,
+        method,
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+          'Content-Type': 'application/json',
+          ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {})
+        }
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => {
+          let parsed;
+          try {
+            parsed = data ? JSON.parse(data) : {};
+          } catch (e) {
+            parsed = { raw: data };
+          }
+          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, data: parsed });
+        });
+      }
+    );
+
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
 
 // ===================================================
 // 0) ENV + BASIC VALIDATION
@@ -281,21 +323,14 @@ app.post('/api/payment/initialize', async (req, res) => {
     const amountKobo = Math.round(amountNaira * 100);
 
     // Initialize with Paystack
-    const initRes = await fetch('https://api.paystack.co/transaction/initialize', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        email,
-        amount: amountKobo,
-        currency: 'NGN',
-        metadata
-      })
+    const initRes = await paystackRequest('/transaction/initialize', 'POST', {
+      email,
+      amount: amountKobo,
+      currency: 'NGN',
+      metadata
     });
 
-    const initData = await initRes.json().catch(() => ({}));
+    const initData = initRes.data || {};
 
     if (!initRes.ok || !initData.status) {
       console.error('❌ Paystack initialize failed:', initData);
@@ -421,19 +456,10 @@ async function handlePaymentVerification(req, res) {
 
     console.log('📡 Calling Paystack verify endpoint...');
 
-    const paystackResponse = await fetch(
-      `https://api.paystack.co/transaction/verify/${reference}`,
-      {
-        method:  'GET',
-        headers: {
-          Authorization:  `Bearer ${PAYSTACK_SECRET_KEY}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+    const paystackResponse = await paystackRequest(`/transaction/verify/${reference}`, 'GET');
 
     if (!paystackResponse.ok) {
-      console.error('❌ Paystack API error:', paystackResponse.status, paystackResponse.statusText);
+      console.error('❌ Paystack API error:', paystackResponse.status, paystackResponse.data);
       return res.status(400).json({
         success: false,
         message: 'Failed to verify payment with Paystack',
@@ -441,7 +467,7 @@ async function handlePaymentVerification(req, res) {
       });
     }
 
-    const paymentData = await paystackResponse.json();
+    const paymentData = paystackResponse.data;
     console.log('📦 Paystack response status:', paymentData.status);
     console.log('📦 Paystack payment status:',  paymentData.data?.status);
 
@@ -617,12 +643,10 @@ app.get('/api/admin/payments', verifyAdmin, async (req, res) => {
         $group: {
           _id: null,
           totalAmount: { $sum: '$amount' },
-          successCount: {
-            $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] }
-          },
-          pendingCount: {
-            $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] }
-          }
+          totalCount:  { $sum: 1 },
+          successCount: { $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] } },
+          pendingCount: { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
+          failedCount:  { $sum: { $cond: [{ $eq: ['$status', 'failed']  }, 1, 0] } }
         }
       }
     ]);
@@ -854,8 +878,8 @@ function formatDateWAT(date) {
 function resolveImageUrl(imagePath) {
   if (!imagePath) return '';
   
-  // If already absolute URL, return as is
-  if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
+  // If already absolute URL or data URL, return as is
+  if (imagePath.startsWith('http://') || imagePath.startsWith('https://') || imagePath.startsWith('data:') || imagePath.startsWith('blob:')) {
     return imagePath;
   }
   
