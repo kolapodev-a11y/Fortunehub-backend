@@ -252,6 +252,100 @@ app.get('/health', (req, res) => {
 app.get('/api/payment/verify',  async (req, res) => handlePaymentVerification(req, res));
 app.post('/api/payment/verify', async (req, res) => handlePaymentVerification(req, res));
 
+// ===================================================
+// 6.1) INITIALIZE PAYSTACK TRANSACTION (RECOMMENDED)
+//      Fixes Paystack popup "We could not start this transaction"
+//      by creating a transaction on the server first.
+// ===================================================
+app.post('/api/payment/initialize', async (req, res) => {
+  try {
+    if (!PAYSTACK_SECRET_KEY) {
+      return res.status(500).json({
+        success: false,
+        message: 'Server misconfigured: PAYSTACK_SECRET_KEY is missing'
+      });
+    }
+
+    const email = String(req.body?.email || '').trim();
+    const amountNaira = Number(req.body?.amount);
+    const metadata = req.body?.metadata || {};
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email is required' });
+    }
+
+    if (!Number.isFinite(amountNaira) || amountNaira <= 0) {
+      return res.status(400).json({ success: false, message: 'Amount must be a number greater than 0 (in Naira)' });
+    }
+
+    const amountKobo = Math.round(amountNaira * 100);
+
+    // Initialize with Paystack
+    const initRes = await fetch('https://api.paystack.co/transaction/initialize', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        email,
+        amount: amountKobo,
+        currency: 'NGN',
+        metadata
+      })
+    });
+
+    const initData = await initRes.json().catch(() => ({}));
+
+    if (!initRes.ok || !initData.status) {
+      console.error('❌ Paystack initialize failed:', initData);
+      return res.status(400).json({
+        success: false,
+        message: initData.message || 'Failed to initialize transaction',
+        error: initData
+      });
+    }
+
+    const reference = initData.data?.reference;
+    const access_code = initData.data?.access_code;
+
+    // Save as pending in DB (helps admin payments list show attempts)
+    if (reference) {
+      try {
+        await Payment.findOneAndUpdate(
+          { reference },
+          {
+            reference,
+            email,
+            amount: amountNaira, // store in NAIRA
+            currency: 'NGN',
+            status: 'pending',
+            metadata,
+            paymentDate: new Date()
+          },
+          { upsert: true, new: true }
+        );
+      } catch (dbErr) {
+        console.log('ℹ️  Initialize: could not save pending payment (non-fatal):', dbErr.message);
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'Transaction initialized',
+      reference,
+      access_code
+    });
+  } catch (err) {
+    console.error('❌ Initialize payment error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to initialize transaction',
+      error: err.message
+    });
+  }
+});
+
 async function handlePaymentVerification(req, res) {
   try {
     const reference = req.query.reference || req.body?.reference;
