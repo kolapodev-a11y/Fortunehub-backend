@@ -180,6 +180,23 @@ async function connectMongo() {
     console.log('🔗 Mongoose connected to MongoDB');
     console.log('✅ MongoDB Connected Successfully');
     console.log('📊 Database:', mongoose.connection.name);
+
+    // ✅ FIX: Drop stale 'id_1' unique index on products collection (caused E11000 duplicate key error)
+    // This index existed from an old products.json schema where 'id' was a field with unique constraint.
+    // The new Product schema does NOT have an 'id' field, so MongoDB stores id=null for all docs, triggering E11000.
+    try {
+      const productsCollection = mongoose.connection.db.collection('products');
+      const indexes = await productsCollection.indexes();
+      const hasOldIdIndex = indexes.some(idx => idx.name === 'id_1');
+      if (hasOldIdIndex) {
+        await productsCollection.dropIndex('id_1');
+        console.log('🧹 Dropped stale id_1 index from products collection');
+      }
+    } catch (idxErr) {
+      // Non-fatal: index may not exist or already dropped
+      console.log('ℹ️  id_1 index cleanup (non-fatal):', idxErr.message);
+    }
+
   } catch (err) {
     console.error('❌ MongoDB Connection Error:', err.message);
     console.log('⏳ Retrying MongoDB connection in 5s...');
@@ -583,7 +600,7 @@ app.delete('/api/admin/payments/clear-all', verifyAdmin, async (req, res) => {
 // ===================================================
 const productSchema = new mongoose.Schema({
   name:            { type: String, required: true },
-  price:           { type: Number, required: true },  // stored in KOBO (like products.json)
+  price:           { type: Number, required: true },  // stored in Naira
   category:        { type: String, required: true },
   description:     { type: String, default: '' },
   image:           { type: String, default: '' },     // primary image (base64 or URL)
