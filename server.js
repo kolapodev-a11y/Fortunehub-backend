@@ -1012,7 +1012,11 @@ function resolveImageUrl(imagePath) {
   }
   
   // Convert relative path to absolute GitHub Pages URL
-  const baseUrl = 'https://kolapodev-a11y.github.io/Fortunehub-frontend/';
+  const PUBLIC_BASE = process.env.PUBLIC_BASE_URL || 'https://fortunehub.name.ng';
+  const absoluteImageUrl = imagePath.startsWith('http')
+    ? imagePath
+    : `${PUBLIC_BASE}${imagePath}`;
+
   
   // Remove leading slash if present
   const cleanPath = imagePath.startsWith('/') ? imagePath.substring(1) : imagePath;
