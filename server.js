@@ -99,17 +99,60 @@ function paystackRequest(path, method, bodyObj = null) {
 // ===================================================
 // 1) CORS
 // ===================================================
+// ✅ FIX (ADMIN PANEL PRODUCT SAVE FAILS): allow admin.html to work even when opened
+// from a different origin (e.g. file:// on mobile gives Origin: null) and when you
+// deploy to new domains.
+//
+// - Add extra allowed origins using env var: ALLOWED_ORIGINS
+//   Example (Render):
+//   ALLOWED_ORIGINS=https://your-admin-domain.com,https://another-domain.com
+//
+// Security note: We still echo back the request Origin (not '*') because
+// credentials=true cannot be used with wildcard.
+const DEFAULT_ALLOWED_ORIGINS = [
+  'https://kolapodev-a11y.github.io',
+  'https://fortunehub.name.ng',
+  'https://www.fortunehub.name.ng',
+  'https://fortunehub-frontend.vercel.app',
+  'http://localhost:3000',
+  'http://localhost:5000',
+  'http://127.0.0.1:5500',
+  'http://127.0.0.1:5501'
+];
+
+const EXTRA_ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const ALLOWED_ORIGINS = Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...EXTRA_ALLOWED_ORIGINS]));
+
 const corsOptions = {
-  origin: [
-    'https://kolapodev-a11y.github.io',
-    'https://fortunehub.name.ng',             // <--- Add this
-    'https://www.fortunehub.name.ng',         // <--- Add this
-    'https://fortunehub-frontend.vercel.app', // <--- Add this
-    'http://localhost:3000',
-    'http://localhost:5000',
-    'http://127.0.0.1:5500',
-    'http://127.0.0.1:5501'
-  ],
+  origin: (origin, cb) => {
+    // Requests from tools like curl/postman may have no origin
+    if (!origin) return cb(null, true);
+
+    // When admin.html is opened as a local file on some phones/browsers
+    if (origin === 'null') return cb(null, true);
+
+    // Exact whitelist
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+
+    // Allow common subdomains safely (optional convenience)
+    try {
+      const o = new URL(origin);
+      const host = o.hostname.toLowerCase();
+      if (
+        host.endsWith('.fortunehub.name.ng') ||
+        host.endsWith('.vercel.app') ||
+        host.endsWith('.github.io')
+      ) {
+        return cb(null, true);
+      }
+    } catch (_) {}
+
+    return cb(new Error(`CORS blocked origin: ${origin}`));
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Paystack-Signature'],
   credentials: true,
@@ -221,8 +264,33 @@ app.post(
 // ===================================================
 // 4) BODY PARSERS (AFTER WEBHOOK)
 // ===================================================
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// ✅ FIX (ADMIN PRODUCT UPLOADS): Increase request body size limit.
+// Admin can upload base64 images (data URLs). Default Express limit is ~100kb,
+// which causes product creation/update to fail (often seen as 413 or "Unexpected token <").
+// 15mb is usually enough for a few compressed images.
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+
+// ✅ Return JSON for body parser errors (so admin.html can show a clean toast)
+app.use((err, req, res, next) => {
+  // Body too large
+  if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+    return res.status(413).json({
+      success: false,
+      message: 'Request payload too large. Please upload smaller/compressed images (or use image URLs).'
+    });
+  }
+
+  // Invalid JSON
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid JSON payload.'
+    });
+  }
+
+  return next(err);
+});
 
 // ===================================================
 // 5) MONGODB CONNECTION (WITH RETRY)
