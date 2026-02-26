@@ -3,7 +3,58 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Resend } = require('resend');
+const cloudinary = require('cloudinary').v2;
 require('dotenv').config();
+
+// ===================================================
+// CLOUDINARY CONFIG (for email-safe product images)
+// ===================================================
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// Upload a base64 data URL to Cloudinary and return a public HTTPS URL.
+// Email clients (Gmail/Outlook) do NOT render base64 (data:) images.
+async function uploadImageIfDataUrl(value) {
+  const v = String(value || '').trim();
+  if (!v) return '';
+
+  // Already public URL
+  if (v.startsWith('http://') || v.startsWith('https://')) return v;
+
+  // Only upload data URLs (your admin panel sends base64 like: data:image/png;base64,...)
+  if (!v.startsWith('data:image/')) return v;
+
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+  const apiKey = process.env.CLOUDINARY_API_KEY;
+  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+
+  if (!cloudName || !apiKey || !apiSecret) {
+    throw new Error('Cloudinary env vars missing: set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET');
+  }
+
+  const result = await cloudinary.uploader.upload(v, {
+    folder: 'fortunehub/products'
+  });
+
+  return result.secure_url || result.url || '';
+}
+
+async function normalizeProductImagesForStorage(image, images) {
+  const rawMain = image || '';
+  const rawArray = Array.isArray(images) ? images : (rawMain ? [rawMain] : []);
+
+  const mainUploaded = await uploadImageIfDataUrl(rawMain);
+  const arrayUploaded = (await Promise.all(rawArray.map(uploadImageIfDataUrl)))
+    .filter(Boolean)
+    .slice(0, 4);
+
+  const finalMain = mainUploaded || arrayUploaded[0] || '';
+
+  return { image: finalMain, images: arrayUploaded };
+}
 
 const app = express();
 const https = require('https');
@@ -902,7 +953,9 @@ app.get('/api/products/:id', verifyAdmin, async (req, res) => {
   }
 });
 
-// POST create product (ADMIN) — images sent as base64 strings in JSON
+// POST create product (ADMIN)
+// ✅ FIX: If admin uploads base64 (data:image/...), upload to Cloudinary and store secure_url.
+// This makes images display properly in emails (Gmail blocks base64 images).
 app.post('/api/products', verifyAdmin, async (req, res) => {
   try {
     const { name, price, category, description, image, images, tag, outOfStock, sold, statusIndicator } = req.body;
@@ -911,13 +964,16 @@ app.post('/api/products', verifyAdmin, async (req, res) => {
       return res.status(400).json({ success: false, message: 'name, price, and category are required' });
     }
 
+    // Normalize images (upload base64 to Cloudinary)
+    const normalized = await normalizeProductImagesForStorage(image, images);
+
     const product = new Product({
       name,
       price:           Number(price),
-      category:        category.toLowerCase(),
+      category:        String(category).toLowerCase(),
       description:     description || '',
-      image:           image || '',
-      images:          Array.isArray(images) ? images : (image ? [image] : []),
+      image:           normalized.image || '',
+      images:          normalized.images || [],
       tag:             tag || 'none',
       outOfStock:      Boolean(outOfStock),
       sold:            Boolean(sold),
@@ -934,6 +990,7 @@ app.post('/api/products', verifyAdmin, async (req, res) => {
 });
 
 // PUT update product (ADMIN)
+// ✅ FIX: If admin sends base64 images, upload to Cloudinary and store secure_url.
 app.put('/api/products/:id', verifyAdmin, async (req, res) => {
   try {
     const { name, price, category, description, image, images, tag, outOfStock, sold, statusIndicator } = req.body;
@@ -941,10 +998,17 @@ app.put('/api/products/:id', verifyAdmin, async (req, res) => {
     const updateData = {};
     if (name            !== undefined) updateData.name            = name;
     if (price           !== undefined) updateData.price           = Number(price);
-    if (category        !== undefined) updateData.category        = category.toLowerCase();
+    if (category        !== undefined) updateData.category        = String(category).toLowerCase();
     if (description     !== undefined) updateData.description     = description;
-    if (image           !== undefined) updateData.image           = image;
-    if (images          !== undefined) updateData.images          = Array.isArray(images) ? images : [image];
+
+    // If either image or images is provided, normalize (Cloudinary upload for base64)
+    if (image !== undefined || images !== undefined) {
+      const normalized = await normalizeProductImagesForStorage(image, images);
+      if (image  !== undefined) updateData.image  = normalized.image || '';
+      // If images provided, use normalized array. If only image provided, still set images array.
+      if (images !== undefined || image !== undefined) updateData.images = normalized.images || [];
+    }
+
     if (tag             !== undefined) updateData.tag             = tag;
     if (outOfStock      !== undefined) updateData.outOfStock      = Boolean(outOfStock);
     if (sold            !== undefined) updateData.sold            = Boolean(sold);
@@ -1005,23 +1069,23 @@ function formatDateWAT(date) {
 // ===================================================
 function resolveImageUrl(imagePath) {
   if (!imagePath) return '';
-  
-  // If already absolute URL or data URL, return as is
-  if (imagePath.startsWith('http://') || imagePath.startsWith('https://') || imagePath.startsWith('data:') || imagePath.startsWith('blob:')) {
-    return imagePath;
-  }
-  
-  // Convert relative path to absolute GitHub Pages URL
-  const PUBLIC_BASE = process.env.PUBLIC_BASE_URL || 'https://fortunehub.name.ng';
-  const absoluteImageUrl = imagePath.startsWith('http')
-    ? imagePath
-    : `${PUBLIC_BASE}${imagePath}`;
 
-  
-  // Remove leading slash if present
-  const cleanPath = imagePath.startsWith('/') ? imagePath.substring(1) : imagePath;
-  
-  return baseUrl + cleanPath;
+  const raw = String(imagePath).trim();
+
+  // Email clients cannot load these
+  if (raw.startsWith('data:') || raw.startsWith('blob:') || raw.startsWith('file:')) {
+    return '';
+  }
+
+  // Already absolute http(s)
+  if (raw.startsWith('http://') || raw.startsWith('https://')) {
+    return raw;
+  }
+
+  // Convert relative path to absolute URL (your canonical domain)
+  const PUBLIC_BASE = (process.env.PUBLIC_BASE_URL || 'https://fortunehub.name.ng').replace(/\/+$/, '');
+  const path = raw.startsWith('/') ? raw : `/${raw}`;
+  return `${PUBLIC_BASE}${path}`;
 }
 
 // ===================================================
@@ -1097,8 +1161,11 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
         // base64 data: URIs are blocked by virtually all email clients (Gmail, Outlook).
         // If the stored image is base64, skip it and use a branded placeholder instead.
         const rawImagePath = item.image || '';
-        const isBase64 = rawImagePath.startsWith('data:');
-        const absoluteImageUrl = isBase64 ? '' : resolveImageUrl(rawImagePath);
+        const isBlockedForEmail =
+          rawImagePath.startsWith('data:') ||
+          rawImagePath.startsWith('blob:') ||
+          rawImagePath.startsWith('file:');
+        const absoluteImageUrl = isBlockedForEmail ? '' : resolveImageUrl(rawImagePath);
         
         const imgSrc = absoluteImageUrl
           ? `<img src="${absoluteImageUrl}" alt="${item.name || 'Product'}"
