@@ -10,7 +10,7 @@ const https = require('https');
 
 function paystackRequest(path, method, bodyObj = null) {
   return new Promise((resolve, reject) => {
-    if (!process.env.PAYSTACK_SECRET_KEY) {
+    if (!PAYSTACK_SECRET_KEY) {
       return reject(new Error('PAYSTACK_SECRET_KEY is missing'));
     }
 
@@ -22,7 +22,7 @@ function paystackRequest(path, method, bodyObj = null) {
         path,
         method,
         headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
           'Content-Type': 'application/json',
           ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {})
         }
@@ -54,7 +54,25 @@ function paystackRequest(path, method, bodyObj = null) {
 // ===================================================
 const PORT = process.env.PORT || 10000;
 const MONGODB_URI = process.env.MONGODB_URI;
-const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+
+// ✅ FIX: Support multiple common env variable names for Paystack keys.
+// Render dashboard may use PAYSTACK_SECRET_KEY, PAYSTACK_ACK_SECRET, or PAYSTACK_SECRET.
+// The PUBLIC key must also be set so the backend can return it to the frontend,
+// ensuring the frontend always uses the SAME account's public key.
+const PAYSTACK_SECRET_KEY =
+  process.env.PAYSTACK_SECRET_KEY ||
+  process.env.PAYSTACK_ACK_SECRET ||
+  process.env.PAYSTACK_SECRET ||
+  '';
+
+// ✅ FIX: Backend returns PAYSTACK_PUBLIC_KEY to frontend in /api/payment/initialize
+// so the frontend popup always uses the matching public key for the same account.
+const PAYSTACK_PUBLIC_KEY =
+  process.env.PAYSTACK_PUBLIC_KEY ||
+  process.env.PAYSTACK_ACK_PUB ||
+  process.env.PAYSTACK_PUB ||
+  '';
+
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const OWNER_EMAIL = process.env.OWNER_EMAIL;
 
@@ -372,7 +390,10 @@ app.post('/api/payment/initialize', async (req, res) => {
       success: true,
       message: 'Transaction initialized',
       reference,
-      access_code
+      access_code,
+      // ✅ FIX: Return public key so frontend uses the SAME account's key in PaystackPop.setup()
+      // This prevents "We could not start this transaction" caused by mismatched public/secret keys.
+      public_key: PAYSTACK_PUBLIC_KEY || undefined
     });
   } catch (err) {
     console.error('❌ Initialize payment error:', err);
@@ -1612,6 +1633,7 @@ app.listen(PORT, () => {
   console.log('✉️  MAIL_FROM:',       MAIL_FROM);
   console.log('📮 Owner Email:',     OWNER_EMAIL           ? `✅ ${OWNER_EMAIL}` : '❌ Missing');
   console.log('🗄️  MongoDB URI:',     MONGODB_URI           ? '✅ Configured' : '❌ Missing');
+  console.log('🔑 Paystack Public Key:', PAYSTACK_PUBLIC_KEY ? `✅ ${PAYSTACK_PUBLIC_KEY.substring(0, 18)}...` : '⚠️  Missing (set PAYSTACK_PUBLIC_KEY in Render env)');
   if (PAYSTACK_SECRET_KEY) {
     if (PAYSTACK_SECRET_KEY.startsWith('pk_')) {
       console.error('🚨 PAYSTACK_SECRET_KEY looks like a PUBLIC key (starts with pk_)! Use the SECRET key (sk_test_... or sk_live_...)');
