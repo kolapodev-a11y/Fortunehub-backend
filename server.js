@@ -273,6 +273,7 @@ app.get('/', (req, res) => {
     endpoints: {
       verify:   '/api/payment/verify?reference=xxx',
       webhook:  '/api/payment/webhook/paystack',
+      currency: 'NGN (Nigerian Naira ₦)',
       payments: '/api/payments',
       admin:    '/api/admin/login',
       health:   '/health'
@@ -302,9 +303,10 @@ app.post('/api/payment/verify', async (req, res) => handlePaymentVerification(re
 app.post('/api/payment/initialize', async (req, res) => {
   try {
     if (!PAYSTACK_SECRET_KEY) {
+      console.error('❌ PAYSTACK_SECRET_KEY is not set in environment variables!');
       return res.status(500).json({
         success: false,
-        message: 'Server misconfigured: PAYSTACK_SECRET_KEY is missing'
+        message: 'Server misconfigured: PAYSTACK_SECRET_KEY is missing. Set it in your Render/hosting environment variables.'
       });
     }
 
@@ -322,10 +324,11 @@ app.post('/api/payment/initialize', async (req, res) => {
 
     const amountKobo = Math.round(amountNaira * 100);
 
-    // Initialize with Paystack
+    // Initialize with Paystack — currency MUST be 'NGN' (Naira)
+    // Amount is in KOBO (Naira × 100) as required by Paystack
     const initRes = await paystackRequest('/transaction/initialize', 'POST', {
       email,
-      amount: amountKobo,
+      amount: amountKobo,   // kobo = naira * 100
       currency: 'NGN',
       metadata
     });
@@ -1609,7 +1612,19 @@ app.listen(PORT, () => {
   console.log('✉️  MAIL_FROM:',       MAIL_FROM);
   console.log('📮 Owner Email:',     OWNER_EMAIL           ? `✅ ${OWNER_EMAIL}` : '❌ Missing');
   console.log('🗄️  MongoDB URI:',     MONGODB_URI           ? '✅ Configured' : '❌ Missing');
-  console.log('💳 Paystack Secret:', PAYSTACK_SECRET_KEY   ? '✅ Configured' : '❌ Missing');
+  if (PAYSTACK_SECRET_KEY) {
+    if (PAYSTACK_SECRET_KEY.startsWith('pk_')) {
+      console.error('🚨 PAYSTACK_SECRET_KEY looks like a PUBLIC key (starts with pk_)! Use the SECRET key (sk_test_... or sk_live_...)');
+    } else if (PAYSTACK_SECRET_KEY.startsWith('sk_test_')) {
+      console.log('💳 Paystack Secret: ✅ Configured (TEST mode — use pk_test_... in frontend)');
+    } else if (PAYSTACK_SECRET_KEY.startsWith('sk_live_')) {
+      console.log('💳 Paystack Secret: ✅ Configured (LIVE mode — use pk_live_... in frontend)');
+    } else {
+      console.log('💳 Paystack Secret: ✅ Configured');
+    }
+  } else {
+    console.error('💳 Paystack Secret: ❌ MISSING — Set PAYSTACK_SECRET_KEY in your environment variables!');
+  }
   console.log('👤 Admin Username:',  ADMIN_USERNAME);
 
   if (MAIL_FROM.includes('@resend.dev') && !process.env.MAIL_FROM) {
