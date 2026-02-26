@@ -412,7 +412,28 @@ app.post('/api/payment/initialize', async (req, res) => {
 
     const email = String(req.body?.email || '').trim();
     const amountNaira = Number(req.body?.amount);
-    const metadata = req.body?.metadata || {};
+    const rawMetadata = req.body?.metadata || {};
+
+    // ✅ FIX: Strip base64 images from cart_items before sending to Paystack.
+    // Paystack rejects metadata larger than ~5KB. Admin-panel products store images
+    // as base64 data URLs (data:image/...) which can be 50–300 KB each. When such
+    // a product is in the cart the metadata blows up Paystack's limit, causing
+    // "We could not start this transaction / Unknown error occurred".
+    // products.json products use short relative paths so they were NOT affected.
+    function sanitizeMetadataForPaystack(meta) {
+      const out = Object.assign({}, meta);
+      if (Array.isArray(out.cart_items)) {
+        out.cart_items = out.cart_items.map(function(item) {
+          const img = String(item.image || '');
+          // Remove base64 data URLs and any URL longer than 300 chars
+          const safeImg = (img.startsWith('data:') || img.length > 300) ? '' : img;
+          return Object.assign({}, item, { image: safeImg });
+        });
+      }
+      return out;
+    }
+
+    const metadata = sanitizeMetadataForPaystack(rawMetadata);
 
     if (!email) {
       return res.status(400).json({ success: false, message: 'Email is required' });
@@ -426,6 +447,7 @@ app.post('/api/payment/initialize', async (req, res) => {
 
     // Initialize with Paystack — currency MUST be 'NGN' (Naira)
     // Amount is in KOBO (Naira × 100) as required by Paystack
+    // metadata is already sanitized above (base64 images stripped)
     const initRes = await paystackRequest('/transaction/initialize', 'POST', {
       email,
       amount: amountKobo,   // kobo = naira * 100
