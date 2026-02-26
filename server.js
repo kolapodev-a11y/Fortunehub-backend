@@ -907,7 +907,7 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
   const shippingState  = metadata?.shipping_state  || '';
 
   // --- Subtotal from cart items (prices stored in NAIRA in the frontend cart) ---
-  // NOTE: Frontend cart now stores prices in NAIRA. No conversion needed.
+  // NOTE: Frontend stores prices in Naira. Do NOT divide by 100.
   const subtotalNaira = cartItems.reduce((sum, item) => sum + (item.price || 0) * (item.quantity || 1), 0);
 
   // --- If shipping_fee not in metadata, derive from total - subtotal ---
@@ -925,7 +925,7 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
   // --- Build items table rows with ABSOLUTE image URLs ---
   const itemsHTML = cartItems.length > 0
     ? cartItems.map(item => {
-        const itemPrice = Number(item.price || 0);  // already in Naira
+        const itemPrice = Number(item.price || 0);  // already in Naira (frontend cart stores Naira)
         const qty       = Number(item.quantity || 1);
         const lineTotal = itemPrice * qty;
         
