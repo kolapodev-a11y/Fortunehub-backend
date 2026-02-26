@@ -979,8 +979,8 @@ app.delete('/api/products/:id', verifyAdmin, async (req, res) => {
 // ===================================================
 function formatNaira(amount) {
   return '₦' + Number(amount || 0).toLocaleString('en-NG', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0
   });
 }
 
@@ -1030,13 +1030,40 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
   // --- Extract metadata fields (with safe fallbacks) ---
   const customerName   = metadata?.customer_name   || metadata?.custom_fields?.[0]?.value || 'Customer';
   const customerPhone  = metadata?.customer_phone  || '';
-  const cartItems      = Array.isArray(metadata?.cart_items) ? metadata.cart_items : [];
+  const rawCartItems   = Array.isArray(metadata?.cart_items) ? metadata.cart_items : [];
   const shippingFee    = Number(metadata?.shipping_fee  || 0);   // naira
+
+  // ✅ FIX: Enrich cart items with product images from DB.
+  // During checkout, base64 images are intentionally stripped from cart metadata
+  // to avoid Paystack's ~5KB metadata limit. Here we restore them from MongoDB
+  // so the order confirmation email can show product images.
+  const cartItems = await Promise.all(rawCartItems.map(async (item) => {
+    if (!item.image && item.id) {
+      try {
+        const prodId = String(item.id);
+        // Try MongoDB _id first, then fallback numeric id field
+        let prod = null;
+        if (prodId.match(/^[a-f0-9]{24}$/i)) {
+          prod = await Product.findById(prodId).select('image images').lean();
+        }
+        if (!prod) {
+          prod = await Product.findOne({ id: prodId }).select('image images').lean();
+        }
+        if (prod) {
+          const img = (Array.isArray(prod.images) && prod.images[0]) || prod.image || '';
+          return { ...item, image: img };
+        }
+      } catch(e) {
+        console.warn('⚠️ Could not enrich cart item image for id', item.id, ':', e.message);
+      }
+    }
+    return item;
+  }));
   const shippingState  = metadata?.shipping_state  || '';
 
   // --- Subtotal from cart items (prices stored in NAIRA in the frontend cart) ---
   // NOTE: Frontend stores prices in Naira. Do NOT divide by 100.
-  const subtotalNaira = cartItems.reduce((sum, item) => sum + (item.price || 0) * (item.quantity || 1), 0);
+  const subtotalNaira = cartItems.reduce((sum, item) => sum + Number(item.price || 0) * (Number(item.quantity) || 1), 0);
 
   // --- If shipping_fee not in metadata, derive from total - subtotal ---
   const derivedShippingFee = shippingFee > 0
