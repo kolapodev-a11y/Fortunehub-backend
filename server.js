@@ -23,7 +23,8 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'fortunehub2026';
 // ---------------------------------------------------
 // ⚠️  SPAM / DOMAIN WARNING:
 // ---------------------------------------------------
-const MAIL_FROM = process.env.MAIL_FROM || 'FortuneHub <onboarding@resend.dev>';
+const MAIL_FROM = 'Fortunehub <hello@fortunehub.name.ng>';
+
 
 // Initialize Resend (safe even if key is missing; sending will fail with a clear message)
 const resend = new Resend(RESEND_API_KEY || '');
@@ -34,6 +35,9 @@ const resend = new Resend(RESEND_API_KEY || '');
 const corsOptions = {
   origin: [
     'https://kolapodev-a11y.github.io',
+    'https://fortunehub.name.ng',             // <--- Add this
+    'https://www.fortunehub.name.ng',         // <--- Add this
+    'https://fortunehub-frontend.vercel.app', // <--- Add this
     'http://localhost:3000',
     'http://localhost:5000',
     'http://127.0.0.1:5500',
@@ -121,7 +125,7 @@ app.post(
 
         if (!updated.emailSent) {
           try {
-            const emailResp = await sendPaymentEmail({
+            await sendPaymentEmails({
               toEmail:     email,
               reference,
               amountNaira,
@@ -131,7 +135,7 @@ app.post(
             });
 
             await Payment.findOneAndUpdate({ reference }, { emailSent: true });
-            console.log('✅ Webhook email sent:', emailResp?.id || '(no id)');
+            console.log('✅ Webhook emails sent successfully');
           } catch (e) {
             console.error('❌ Webhook email failed:', e?.message || e);
             // do not fail webhook
@@ -265,7 +269,7 @@ async function handlePaymentVerification(req, res) {
       // Retry email
       let resent = false;
       try {
-        const emailResp = await sendPaymentEmail({
+        await sendPaymentEmails({
           toEmail:     existingPayment.email,
           reference:   existingPayment.reference,
           amountNaira: existingPayment.amount,
@@ -274,7 +278,7 @@ async function handlePaymentVerification(req, res) {
           metadata:    existingPayment.metadata || {}
         });
         await Payment.findOneAndUpdate({ reference }, { emailSent: true });
-        console.log('✅ Email re-sent successfully:', emailResp?.id || '(no id)');
+        console.log('✅ Emails re-sent successfully');
         resent = true;
       } catch (e) {
         console.error('❌ Email re-send failed:', e?.message || e);
@@ -361,10 +365,10 @@ async function handlePaymentVerification(req, res) {
 
     console.log('💾 Payment saved to database:', payment._id);
 
-    // Send rich confirmation email
+    // Send rich confirmation emails (customer + owner)
     let emailSent = false;
     try {
-      const emailResp = await sendPaymentEmail({
+      await sendPaymentEmails({
         toEmail:     customerEmail,
         reference,
         amountNaira,
@@ -373,7 +377,7 @@ async function handlePaymentVerification(req, res) {
         metadata:    metadata || {}
       });
 
-      console.log('✅ Email sent successfully:', emailResp?.id || '(no id)');
+      console.log('✅ Emails sent successfully');
       emailSent = true;
       await Payment.findOneAndUpdate({ reference }, { emailSent: true });
     } catch (e) {
@@ -551,6 +555,22 @@ app.get('/api/payments', async (req, res) => {
   }
 });
 
+// Admin: Clear all transactions (DELETE endpoint)
+app.delete('/api/admin/payments/clear-all', verifyAdmin, async (req, res) => {
+  try {
+    const result = await Payment.deleteMany({});
+    console.log(`✅ Cleared ${result.deletedCount} transaction(s) from database`);
+    res.json({ 
+      success: true, 
+      message: `Successfully cleared ${result.deletedCount} transaction(s)`,
+      deletedCount: result.deletedCount 
+    });
+  } catch (error) {
+    console.error('❌ Error clearing transactions:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // ===================================================
 // 8) UTILITY: Format currency (Naira)
 // ===================================================
@@ -578,9 +598,29 @@ function formatDateWAT(date) {
 }
 
 // ===================================================
-// 10) EMAIL SENDER — RICH FULL-INFO TEMPLATE
+// 10) UTILITY: Convert relative image URLs to absolute
 // ===================================================
-async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, paidAt, metadata }) {
+function resolveImageUrl(imagePath) {
+  if (!imagePath) return '';
+  
+  // If already absolute URL, return as is
+  if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
+    return imagePath;
+  }
+  
+  // Convert relative path to absolute GitHub Pages URL
+  const baseUrl = 'https://kolapodev-a11y.github.io/Fortunehub-frontend/';
+  
+  // Remove leading slash if present
+  const cleanPath = imagePath.startsWith('/') ? imagePath.substring(1) : imagePath;
+  
+  return baseUrl + cleanPath;
+}
+
+// ===================================================
+// 11) EMAIL SENDER — SEND BOTH CUSTOMER & OWNER EMAILS
+// ===================================================
+async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, paidAt, metadata }) {
   if (!toEmail) throw new Error('Missing customer email');
   if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY is missing (cannot send email)');
 
@@ -607,14 +647,18 @@ async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, pai
   const dateFormatted = formatDateWAT(paidAt || new Date());
   const yearNow       = new Date().getFullYear();
 
-  // --- Build items table rows ---
+  // --- Build items table rows with ABSOLUTE image URLs ---
   const itemsHTML = cartItems.length > 0
     ? cartItems.map(item => {
         const itemPrice = Number(item.price || 0) / 100;  // kobo → naira
         const qty       = Number(item.quantity || 1);
         const lineTotal = itemPrice * qty;
-        const imgSrc    = item.image
-          ? `<img src="${item.image}" alt="${item.name || 'Product'}"
+        
+        // Convert image to absolute URL
+        const absoluteImageUrl = resolveImageUrl(item.image);
+        
+        const imgSrc = absoluteImageUrl
+          ? `<img src="${absoluteImageUrl}" alt="${item.name || 'Product'}"
                   style="width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid #e8e8e8;" />`
           : '<div style="width:60px;height:60px;background:#f0f0f0;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#999;">No img</div>';
 
@@ -646,15 +690,10 @@ async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, pai
     ? `Shipping Fee (${shippingState})`
     : 'Shipping Fee';
 
-  // CC owner email if set
-  const cc = OWNER_EMAIL ? [OWNER_EMAIL] : undefined;
-
-  return resend.emails.send({
-    from:    MAIL_FROM,
-    to:      [toEmail],
-    cc,
-    subject: '✅ Order Confirmed! - FortuneHub',
-    html: `
+  // ========================================
+  // CUSTOMER EMAIL (Existing template)
+  // ========================================
+  const customerEmailHTML = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -924,8 +963,362 @@ async function sendPaymentEmail({ toEmail, reference, amountNaira, currency, pai
   </table>
 </body>
 </html>
-    `
+  `;
+
+  // ========================================
+  // OWNER EMAIL (New template with action buttons)
+  // ========================================
+  const whatsappNumber = customerPhone.replace(/\D/g, ''); // Remove non-digits
+  const whatsappLink = `https://wa.me/234${whatsappNumber.substring(1)}?text=Hi%20${encodeURIComponent(customerName)},%20regarding%20your%20FortuneHub%20order%20${reference}`;
+  const emailLink = `mailto:${toEmail}?subject=Your%20FortuneHub%20Order%20${reference}`;
+
+  const ownerEmailHTML = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>New Order Received – FortuneHub</title>
+  <style>
+    * { box-sizing: border-box; }
+    body, table, td, p, a, li, blockquote {
+      -webkit-text-size-adjust: 100%;
+      -ms-text-size-adjust: 100%;
+    }
+    body  { margin:0; padding:0; background:#f0f2f5; font-family: 'Segoe UI', Arial, sans-serif; }
+    table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img   { border:0; outline:none; text-decoration:none; display:block; max-width:100%; }
+    a     { color: #4f46e5; text-decoration: none; }
+
+    .email-wrapper  { width:100%; max-width:620px; margin:0 auto; }
+    .email-body     { background:#ffffff; border-radius:12px; overflow:hidden;
+                      box-shadow: 0 4px 24px rgba(0,0,0,0.10); }
+
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding: 36px 24px 28px;
+      text-align: center;
+    }
+    .header .icon { font-size: 40px; line-height:1; margin-bottom:10px; }
+    .header h1 {
+      margin: 0; padding: 0;
+      color: #ffffff;
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+    }
+    .header p  {
+      margin: 8px 0 0; padding: 0;
+      color: rgba(255,255,255,0.88);
+      font-size: 14px;
+    }
+
+    .content { padding: 28px 28px 8px; }
+    .greeting { font-size:16px; color:#1f2937; margin:0 0 6px; font-weight:600; }
+    .intro    { font-size:14px; color:#6b7280; margin:0 0 22px; line-height:1.6; }
+
+    .info-box {
+      background: linear-gradient(135deg, #f8faff 0%, #fef3ff 100%);
+      border: 1px solid #e0e7ff;
+      border-left: 4px solid #667eea;
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 22px;
+    }
+    .info-box table { width:100%; }
+    .info-box td   { font-size:13px; padding:3px 0; color:#374151; }
+    .info-box .lbl { font-weight:700; color:#4b5563; width:130px; }
+
+    .section-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: #1f2937;
+      margin: 22px 0 10px;
+      padding-bottom: 6px;
+      border-bottom: 2px solid #f0f0f0;
+    }
+
+    .items-table { width:100%; border-collapse:collapse; margin-bottom:0; }
+    .items-table thead tr { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+    .items-table thead th {
+      padding: 10px 8px;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      text-align: left;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .items-table thead th:nth-child(3) { text-align:center; }
+    .items-table thead th:nth-child(4) { text-align:right;  }
+    .items-table tbody tr:nth-child(even) td { background:#fafafa; }
+
+    .totals-box {
+      background: linear-gradient(135deg, #f8faff 0%, #fef3ff 100%);
+      border: 1px solid #e9d5ff;
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin: 14px 0 22px;
+    }
+    .totals-box table { width:100%; }
+    .totals-box td    { font-size:14px; padding:4px 0; color:#374151; }
+    .totals-box .lbl  { font-weight:500; }
+    .totals-box .val  { text-align:right; font-weight:600; }
+    .total-row td     { font-size:17px !important; font-weight:800 !important;
+                        color:#667eea !important; padding-top:10px !important;
+                        border-top:2px solid #e9d5ff; }
+
+    .action-box {
+      background: linear-gradient(135deg, #fff5f5 0%, #fef3f3 100%);
+      border: 2px solid #fca5a5;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 22px 0;
+      text-align: center;
+    }
+    .action-box h3 {
+      margin: 0 0 12px;
+      font-size: 16px;
+      color: #991b1b;
+    }
+    .action-box p {
+      margin: 0 0 16px;
+      font-size: 13px;
+      color: #7f1d1d;
+      line-height: 1.5;
+    }
+    .action-buttons {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .btn {
+      display: inline-block;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: all 0.3s;
+    }
+    .btn-whatsapp {
+      background: #25D366;
+      color: #ffffff !important;
+    }
+    .btn-whatsapp:hover {
+      background: #128C7E;
+    }
+    .btn-email {
+      background: #667eea;
+      color: #ffffff !important;
+    }
+    .btn-email:hover {
+      background: #5568d3;
+    }
+
+    .footer {
+      background: linear-gradient(135deg, #f8faff 0%, #faf5ff 100%);
+      border-top: 1px solid #e9d5ff;
+      padding: 18px 24px;
+      text-align: center;
+    }
+    .footer p  { margin:3px 0; font-size:12px; color:#9ca3af; }
+    .footer .brand { font-size:13px; font-weight:700; color:#6b7280; }
+
+    @media only screen and (max-width: 480px) {
+      .content     { padding: 20px 16px 8px !important; }
+      .header      { padding: 28px 16px 22px !important; }
+      .header h1   { font-size: 22px !important; }
+      .items-table thead th,
+      .items-table tbody td { font-size: 12px !important; padding: 8px 5px !important; }
+      .items-table thead th:first-child { display:none; }
+      .items-table tbody td:first-child { display:none; }
+      .action-buttons {
+        flex-direction: column;
+      }
+      .btn {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <table width="100%" cellpadding="0" cellspacing="0" border="0"
+         style="background:#f0f2f5; padding: 24px 12px;">
+    <tr>
+      <td align="center">
+        <table class="email-wrapper" cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <td>
+              <div class="email-body">
+
+                <!-- HEADER -->
+                <div class="header">
+                  <div class="icon">🔔</div>
+                  <h1>New Order Received!</h1>
+                  <p>You have a new customer order to process</p>
+                </div>
+
+                <!-- BODY -->
+                <div class="content">
+                  <p class="greeting">Hello Admin,</p>
+                  <p class="intro">
+                    A new order has been placed on FortuneHub. Please review the details below and contact the customer to arrange delivery.
+                  </p>
+
+                  <!-- Customer Information -->
+                  <div class="section-title">👤 Customer Information</div>
+                  <div class="info-box">
+                    <table>
+                      <tr>
+                        <td class="lbl">Name:</td>
+                        <td><strong>${customerName}</strong></td>
+                      </tr>
+                      <tr>
+                        <td class="lbl">Email:</td>
+                        <td><a href="mailto:${toEmail}">${toEmail}</a></td>
+                      </tr>
+                      <tr>
+                        <td class="lbl">Phone:</td>
+                        <td><strong>${customerPhone}</strong></td>
+                      </tr>
+                      ${shippingState ? `
+                      <tr>
+                        <td class="lbl">Delivery State:</td>
+                        <td>${shippingState}</td>
+                      </tr>` : ''}
+                    </table>
+                  </div>
+
+                  <!-- Order Details -->
+                  <div class="section-title">📋 Order Details</div>
+                  <div class="info-box">
+                    <table>
+                      <tr>
+                        <td class="lbl">Order Reference:</td>
+                        <td><strong>${reference}</strong></td>
+                      </tr>
+                      <tr>
+                        <td class="lbl">Date &amp; Time:</td>
+                        <td>${dateFormatted}</td>
+                      </tr>
+                      <tr>
+                        <td class="lbl">Currency:</td>
+                        <td>${currency || 'NGN'}</td>
+                      </tr>
+                      <tr>
+                        <td class="lbl">Status:</td>
+                        <td>
+                          <span style="display:inline-block;background:#d1fae5;color:#065f46;
+                                       padding:2px 10px;border-radius:20px;font-size:12px;
+                                       font-weight:700;">
+                            ✔ PAID
+                          </span>
+                        </td>
+                      </tr>
+                    </table>
+                  </div>
+
+                  <!-- Items Ordered -->
+                  <div class="section-title">🛍️ Items Ordered</div>
+                  <table class="items-table">
+                    <thead>
+                      <tr>
+                        <th style="width:70px;">Image</th>
+                        <th>Product</th>
+                        <th style="width:50px;text-align:center;">Qty</th>
+                        <th style="width:110px;text-align:right;">Price</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${itemsHTML}
+                    </tbody>
+                  </table>
+
+                  <!-- Order Totals -->
+                  <div class="totals-box">
+                    <table>
+                      ${cartItems.length > 0 ? `
+                      <tr>
+                        <td class="lbl">Subtotal:</td>
+                        <td class="val">${formatNaira(displaySubtotal)}</td>
+                      </tr>
+                      <tr>
+                        <td class="lbl">${shippingLabel}:</td>
+                        <td class="val">${formatNaira(derivedShippingFee)}</td>
+                      </tr>` : ''}
+                      <tr class="total-row">
+                        <td class="lbl">TOTAL PAID:</td>
+                        <td class="val">${formatNaira(amountNaira)}</td>
+                      </tr>
+                    </table>
+                  </div>
+
+                  <!-- Action Required -->
+                  <div class="action-box">
+                    <h3>⚡ Action Required</h3>
+                    <p>
+                      Contact <strong>${customerName}</strong> to arrange for delivery of the order.
+                      Click the buttons below to reach out via WhatsApp or Email.
+                    </p>
+                    <div class="action-buttons">
+                      <a href="${whatsappLink}" class="btn btn-whatsapp" target="_blank">
+                        💬 WhatsApp Customer
+                      </a>
+                      <a href="${emailLink}" class="btn btn-email">
+                        ✉️ Email Customer
+                      </a>
+                    </div>
+                  </div>
+
+                </div>
+
+                <!-- FOOTER -->
+                <div class="footer">
+                  <p>This is an automated notification from FortuneHub order system.</p>
+                  <p>Order Reference: <strong>${reference}</strong></p>
+                  <p class="brand">© ${yearNow} FortuneHub. All rights reserved.</p>
+                </div>
+
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+  `;
+
+  // Send customer email
+  const customerEmailResp = await resend.emails.send({
+    from:    MAIL_FROM,
+    to:      [toEmail],
+    subject: '✅ Order Confirmed! - FortuneHub',
+    html:    customerEmailHTML
   });
+
+  console.log('✅ Customer email sent:', customerEmailResp?.id || '(no id)');
+
+  // Send owner email (if owner email is configured)
+  if (OWNER_EMAIL) {
+    try {
+      const ownerEmailResp = await resend.emails.send({
+        from:    MAIL_FROM,
+        to:      [OWNER_EMAIL],
+        subject: `🔔 New Order #${reference} - ${customerName}`,
+        html:    ownerEmailHTML
+      });
+      console.log('✅ Owner email sent:', ownerEmailResp?.id || '(no id)');
+    } catch (ownerEmailError) {
+      console.error('❌ Owner email failed (but customer email sent):', ownerEmailError?.message || ownerEmailError);
+      // Don't throw - customer email was successful
+    }
+  }
+
+  return customerEmailResp;
 }
 
 // ===================================================
