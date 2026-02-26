@@ -1040,14 +1040,19 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
   const cartItems = await Promise.all(rawCartItems.map(async (item) => {
     if (!item.image && item.id) {
       try {
-        const prodId = String(item.id);
-        // Try MongoDB _id first, then fallback numeric id field
+        // ✅ FIX: Strip the "db_" prefix that the frontend attaches to MongoDB _ids.
+        // The API returns id as "db_<mongoId>" (e.g. "db_507f1f77bcf86cd799439011").
+        // The raw mongoId (24-char hex) is what Product.findById() expects.
+        const rawId  = String(item.id);
+        const prodId = rawId.startsWith('db_') ? rawId.slice(3) : rawId;
         let prod = null;
         if (prodId.match(/^[a-f0-9]{24}$/i)) {
           prod = await Product.findById(prodId).select('image images').lean();
         }
         if (!prod) {
-          prod = await Product.findOne({ id: prodId }).select('image images').lean();
+          // fallback: search by the virtual "id" field (for products.json items)
+          prod = await Product.findOne({ _id: prodId }).select('image images').lean()
+                 || await Product.findOne({ name: item.name }).select('image images').lean();
         }
         if (prod) {
           const img = (Array.isArray(prod.images) && prod.images[0]) || prod.image || '';
@@ -1084,13 +1089,17 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
         const qty       = Number(item.quantity || 1);
         const lineTotal = itemPrice * qty;
         
-        // Convert image to absolute URL
-        const absoluteImageUrl = resolveImageUrl(item.image);
+        // ✅ FIX: Convert image to absolute URL.
+        // base64 data: URIs are blocked by virtually all email clients (Gmail, Outlook).
+        // If the stored image is base64, skip it and use a branded placeholder instead.
+        const rawImagePath = item.image || '';
+        const isBase64 = rawImagePath.startsWith('data:');
+        const absoluteImageUrl = isBase64 ? '' : resolveImageUrl(rawImagePath);
         
         const imgSrc = absoluteImageUrl
           ? `<img src="${absoluteImageUrl}" alt="${item.name || 'Product'}"
                   style="width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid #e8e8e8;" />`
-          : '<div style="width:60px;height:60px;background:#f0f0f0;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#999;">No img</div>';
+          : '<div style="width:60px;height:60px;background:#f5f0ff;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#8b5cf6;border:1px solid #e8e8e8;">🛍️</div>';
 
         return `
           <tr>
