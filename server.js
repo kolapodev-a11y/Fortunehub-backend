@@ -6,6 +6,48 @@ const { Resend } = require('resend');
 require('dotenv').config();
 
 const app = express();
+const https = require('https');
+
+function paystackRequest(path, method, bodyObj = null) {
+  return new Promise((resolve, reject) => {
+    if (!process.env.PAYSTACK_SECRET_KEY) {
+      return reject(new Error('PAYSTACK_SECRET_KEY is missing'));
+    }
+
+    const body = bodyObj ? JSON.stringify(bodyObj) : null;
+
+    const req = https.request(
+      {
+        hostname: 'api.paystack.co',
+        path,
+        method,
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+          'Content-Type': 'application/json',
+          ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {})
+        }
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => {
+          let parsed;
+          try {
+            parsed = data ? JSON.parse(data) : {};
+          } catch (e) {
+            parsed = { raw: data };
+          }
+          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, data: parsed });
+        });
+      }
+    );
+
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
 
 // ===================================================
 // 0) ENV + BASIC VALIDATION
@@ -180,6 +222,23 @@ async function connectMongo() {
     console.log('🔗 Mongoose connected to MongoDB');
     console.log('✅ MongoDB Connected Successfully');
     console.log('📊 Database:', mongoose.connection.name);
+
+    // ✅ FIX: Drop stale 'id_1' unique index on products collection (caused E11000 duplicate key error)
+    // This index existed from an old products.json schema where 'id' was a field with unique constraint.
+    // The new Product schema does NOT have an 'id' field, so MongoDB stores id=null for all docs, triggering E11000.
+    try {
+      const productsCollection = mongoose.connection.db.collection('products');
+      const indexes = await productsCollection.indexes();
+      const hasOldIdIndex = indexes.some(idx => idx.name === 'id_1');
+      if (hasOldIdIndex) {
+        await productsCollection.dropIndex('id_1');
+        console.log('🧹 Dropped stale id_1 index from products collection');
+      }
+    } catch (idxErr) {
+      // Non-fatal: index may not exist or already dropped
+      console.log('ℹ️  id_1 index cleanup (non-fatal):', idxErr.message);
+    }
+
   } catch (err) {
     console.error('❌ MongoDB Connection Error:', err.message);
     console.log('⏳ Retrying MongoDB connection in 5s...');
@@ -234,6 +293,93 @@ app.get('/health', (req, res) => {
 // Handles both GET + POST
 app.get('/api/payment/verify',  async (req, res) => handlePaymentVerification(req, res));
 app.post('/api/payment/verify', async (req, res) => handlePaymentVerification(req, res));
+
+// ===================================================
+// 6.1) INITIALIZE PAYSTACK TRANSACTION (RECOMMENDED)
+//      Fixes Paystack popup "We could not start this transaction"
+//      by creating a transaction on the server first.
+// ===================================================
+app.post('/api/payment/initialize', async (req, res) => {
+  try {
+    if (!PAYSTACK_SECRET_KEY) {
+      return res.status(500).json({
+        success: false,
+        message: 'Server misconfigured: PAYSTACK_SECRET_KEY is missing'
+      });
+    }
+
+    const email = String(req.body?.email || '').trim();
+    const amountNaira = Number(req.body?.amount);
+    const metadata = req.body?.metadata || {};
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email is required' });
+    }
+
+    if (!Number.isFinite(amountNaira) || amountNaira <= 0) {
+      return res.status(400).json({ success: false, message: 'Amount must be a number greater than 0 (in Naira)' });
+    }
+
+    const amountKobo = Math.round(amountNaira * 100);
+
+    // Initialize with Paystack
+    const initRes = await paystackRequest('/transaction/initialize', 'POST', {
+      email,
+      amount: amountKobo,
+      currency: 'NGN',
+      metadata
+    });
+
+    const initData = initRes.data || {};
+
+    if (!initRes.ok || !initData.status) {
+      console.error('❌ Paystack initialize failed:', initData);
+      return res.status(400).json({
+        success: false,
+        message: initData.message || 'Failed to initialize transaction',
+        error: initData
+      });
+    }
+
+    const reference = initData.data?.reference;
+    const access_code = initData.data?.access_code;
+
+    // Save as pending in DB (helps admin payments list show attempts)
+    if (reference) {
+      try {
+        await Payment.findOneAndUpdate(
+          { reference },
+          {
+            reference,
+            email,
+            amount: amountNaira, // store in NAIRA
+            currency: 'NGN',
+            status: 'pending',
+            metadata,
+            paymentDate: new Date()
+          },
+          { upsert: true, new: true }
+        );
+      } catch (dbErr) {
+        console.log('ℹ️  Initialize: could not save pending payment (non-fatal):', dbErr.message);
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'Transaction initialized',
+      reference,
+      access_code
+    });
+  } catch (err) {
+    console.error('❌ Initialize payment error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to initialize transaction',
+      error: err.message
+    });
+  }
+});
 
 async function handlePaymentVerification(req, res) {
   try {
@@ -310,19 +456,10 @@ async function handlePaymentVerification(req, res) {
 
     console.log('📡 Calling Paystack verify endpoint...');
 
-    const paystackResponse = await fetch(
-      `https://api.paystack.co/transaction/verify/${reference}`,
-      {
-        method:  'GET',
-        headers: {
-          Authorization:  `Bearer ${PAYSTACK_SECRET_KEY}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+    const paystackResponse = await paystackRequest(`/transaction/verify/${reference}`, 'GET');
 
     if (!paystackResponse.ok) {
-      console.error('❌ Paystack API error:', paystackResponse.status, paystackResponse.statusText);
+      console.error('❌ Paystack API error:', paystackResponse.status, paystackResponse.data);
       return res.status(400).json({
         success: false,
         message: 'Failed to verify payment with Paystack',
@@ -330,7 +467,7 @@ async function handlePaymentVerification(req, res) {
       });
     }
 
-    const paymentData = await paystackResponse.json();
+    const paymentData = paystackResponse.data;
     console.log('📦 Paystack response status:', paymentData.status);
     console.log('📦 Paystack payment status:',  paymentData.data?.status);
 
@@ -506,12 +643,10 @@ app.get('/api/admin/payments', verifyAdmin, async (req, res) => {
         $group: {
           _id: null,
           totalAmount: { $sum: '$amount' },
-          successCount: {
-            $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] }
-          },
-          pendingCount: {
-            $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] }
-          }
+          totalCount:  { $sum: 1 },
+          successCount: { $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] } },
+          pendingCount: { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
+          failedCount:  { $sum: { $cond: [{ $eq: ['$status', 'failed']  }, 1, 0] } }
         }
       }
     ]);
@@ -572,6 +707,146 @@ app.delete('/api/admin/payments/clear-all', verifyAdmin, async (req, res) => {
 });
 
 // ===================================================
+
+// ===================================================
+// PRODUCT MANAGEMENT — INSERT AFTER SECTION 7 (Admin Routes)
+// in server.js — PASTE BEFORE the "8) UTILITY" section
+// ===================================================
+
+// ===================================================
+// 7b) PRODUCT MODEL
+// ===================================================
+const productSchema = new mongoose.Schema({
+  name:            { type: String, required: true },
+  price:           { type: Number, required: true },  // stored in Naira
+  category:        { type: String, required: true },
+  description:     { type: String, default: '' },
+  image:           { type: String, default: '' },     // primary image (base64 or URL)
+  images:          [{ type: String }],                // array of up to 4 images
+  tag:             { type: String, default: 'none' }, // 'new' | 'sale' | 'none'
+  outOfStock:      { type: Boolean, default: false },
+  sold:            { type: Boolean, default: false },
+  statusIndicator: { type: String, default: 'available' },
+  createdAt:       { type: Date, default: Date.now }
+});
+
+const Product = mongoose.model('Product', productSchema);
+
+// ===================================================
+// 7c) PRODUCT ROUTES
+// ===================================================
+
+// GET all products (PUBLIC - used by frontend)
+app.get('/api/products', async (req, res) => {
+  try {
+    const dbProducts = await Product.find().sort({ createdAt: -1 });
+
+    // Map to same shape as products.json
+    const mapped = dbProducts.map((p, i) => ({
+      id:              `db_${p._id}`,
+      _id:             p._id,
+      name:            p.name,
+      price:           p.price,
+      category:        p.category,
+      description:     p.description,
+      image:           p.image,
+      images:          p.images && p.images.length ? p.images : [p.image, p.image, p.image],
+      tag:             p.tag,
+      outOfStock:      p.outOfStock,
+      sold:            p.sold,
+      statusIndicator: p.statusIndicator
+    }));
+
+    res.json({ success: true, count: mapped.length, data: mapped });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// GET single product by mongo _id (ADMIN)
+app.get('/api/products/:id', verifyAdmin, async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id);
+    if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
+    res.json({ success: true, data: product });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// POST create product (ADMIN) — images sent as base64 strings in JSON
+app.post('/api/products', verifyAdmin, async (req, res) => {
+  try {
+    const { name, price, category, description, image, images, tag, outOfStock, sold, statusIndicator } = req.body;
+
+    if (!name || !price || !category) {
+      return res.status(400).json({ success: false, message: 'name, price, and category are required' });
+    }
+
+    const product = new Product({
+      name,
+      price:           Number(price),
+      category:        category.toLowerCase(),
+      description:     description || '',
+      image:           image || '',
+      images:          Array.isArray(images) ? images : (image ? [image] : []),
+      tag:             tag || 'none',
+      outOfStock:      Boolean(outOfStock),
+      sold:            Boolean(sold),
+      statusIndicator: statusIndicator || 'available'
+    });
+
+    await product.save();
+    console.log(`✅ New product created: ${product.name} (${product._id})`);
+    res.status(201).json({ success: true, message: 'Product created successfully', data: product });
+  } catch (err) {
+    console.error('❌ Product create error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// PUT update product (ADMIN)
+app.put('/api/products/:id', verifyAdmin, async (req, res) => {
+  try {
+    const { name, price, category, description, image, images, tag, outOfStock, sold, statusIndicator } = req.body;
+
+    const updateData = {};
+    if (name            !== undefined) updateData.name            = name;
+    if (price           !== undefined) updateData.price           = Number(price);
+    if (category        !== undefined) updateData.category        = category.toLowerCase();
+    if (description     !== undefined) updateData.description     = description;
+    if (image           !== undefined) updateData.image           = image;
+    if (images          !== undefined) updateData.images          = Array.isArray(images) ? images : [image];
+    if (tag             !== undefined) updateData.tag             = tag;
+    if (outOfStock      !== undefined) updateData.outOfStock      = Boolean(outOfStock);
+    if (sold            !== undefined) updateData.sold            = Boolean(sold);
+    if (statusIndicator !== undefined) updateData.statusIndicator = statusIndicator;
+
+    const product = await Product.findByIdAndUpdate(req.params.id, updateData, { new: true });
+    if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
+
+    console.log(`✅ Product updated: ${product.name} (${product._id})`);
+    res.json({ success: true, message: 'Product updated successfully', data: product });
+  } catch (err) {
+    console.error('❌ Product update error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// DELETE product (ADMIN)
+app.delete('/api/products/:id', verifyAdmin, async (req, res) => {
+  try {
+    const product = await Product.findByIdAndDelete(req.params.id);
+    if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
+
+    console.log(`✅ Product deleted: ${product.name} (${product._id})`);
+    res.json({ success: true, message: `Product "${product.name}" deleted successfully` });
+  } catch (err) {
+    console.error('❌ Product delete error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // 8) UTILITY: Format currency (Naira)
 // ===================================================
 function formatNaira(amount) {
@@ -603,8 +878,8 @@ function formatDateWAT(date) {
 function resolveImageUrl(imagePath) {
   if (!imagePath) return '';
   
-  // If already absolute URL, return as is
-  if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
+  // If already absolute URL or data URL, return as is
+  if (imagePath.startsWith('http://') || imagePath.startsWith('https://') || imagePath.startsWith('data:') || imagePath.startsWith('blob:')) {
     return imagePath;
   }
   
@@ -631,9 +906,9 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
   const shippingFee    = Number(metadata?.shipping_fee  || 0);   // naira
   const shippingState  = metadata?.shipping_state  || '';
 
-  // --- Subtotal from cart items (prices stored in KOBO in cart) ---
-  const subtotalKobo = cartItems.reduce((sum, item) => sum + (item.price || 0) * (item.quantity || 1), 0);
-  const subtotalNaira = subtotalKobo / 100;
+  // --- Subtotal from cart items (prices stored in NAIRA in the frontend cart) ---
+  // NOTE: Frontend stores prices in Naira. Do NOT divide by 100.
+  const subtotalNaira = cartItems.reduce((sum, item) => sum + (item.price || 0) * (item.quantity || 1), 0);
 
   // --- If shipping_fee not in metadata, derive from total - subtotal ---
   const derivedShippingFee = shippingFee > 0
@@ -650,7 +925,7 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
   // --- Build items table rows with ABSOLUTE image URLs ---
   const itemsHTML = cartItems.length > 0
     ? cartItems.map(item => {
-        const itemPrice = Number(item.price || 0) / 100;  // kobo → naira
+        const itemPrice = Number(item.price || 0);  // already in Naira (frontend cart stores Naira)
         const qty       = Number(item.quantity || 1);
         const lineTotal = itemPrice * qty;
         
