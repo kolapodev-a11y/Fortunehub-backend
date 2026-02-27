@@ -1120,7 +1120,10 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
     return {
       filename: `product-${contentId}.${ext}`,
       content: base64,
-      contentId
+      content_id: contentId  // ✅ FIX: Resend API requires snake_case 'content_id' for inline CID images.
+                              // Using camelCase 'contentId' caused the image to be sent as a regular file
+                              // attachment instead of an inline image, making it appear at the bottom
+                              // of the email and NOT render inside the product table.
     };
   }
 
