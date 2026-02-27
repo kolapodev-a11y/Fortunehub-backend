@@ -1005,23 +1005,33 @@ function formatDateWAT(date) {
 // ===================================================
 function resolveImageUrl(imagePath) {
   if (!imagePath) return '';
-  
-  // If already absolute URL or data URL, return as is
-  if (imagePath.startsWith('http://') || imagePath.startsWith('https://') || imagePath.startsWith('data:') || imagePath.startsWith('blob:')) {
+
+  // Already absolute URL or a data/blob URL
+  if (
+    imagePath.startsWith('http://') ||
+    imagePath.startsWith('https://') ||
+    imagePath.startsWith('data:') ||
+    imagePath.startsWith('blob:')
+  ) {
     return imagePath;
   }
-  
-  // Convert relative path to absolute GitHub Pages URL
-  const PUBLIC_BASE = process.env.PUBLIC_BASE_URL || 'https://fortunehub.name.ng';
-  const absoluteImageUrl = imagePath.startsWith('http')
-    ? imagePath
-    : `${PUBLIC_BASE}${imagePath}`;
 
-  
-  // Remove leading slash if present
-  const cleanPath = imagePath.startsWith('/') ? imagePath.substring(1) : imagePath;
-  
-  return baseUrl + cleanPath;
+  // Email clients require PUBLICLY ACCESSIBLE https image URLs.
+  // If you store images as relative paths (e.g. "/images/p1.jpg"), we convert them
+  // to absolute URLs using PUBLIC_BASE_URL.
+  // Example: PUBLIC_BASE_URL=https://fortunehub.name.ng
+  const PUBLIC_BASE = process.env.PUBLIC_BASE_URL || 'https://fortunehub.name.ng';
+  const baseUrl = PUBLIC_BASE.endsWith('/') ? PUBLIC_BASE : PUBLIC_BASE + '/';
+
+  // Remove leading slash so URL(base, path) works consistently
+  const cleanPath = imagePath.startsWith('/') ? imagePath.slice(1) : imagePath;
+
+  // Use URL() to safely build/encode the final URL
+  try {
+    return new URL(cleanPath, baseUrl).toString();
+  } catch (_) {
+    return baseUrl + cleanPath;
+  }
 }
 
 // ===================================================
@@ -1086,28 +1096,67 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
   const dateFormatted = formatDateWAT(paidAt || new Date());
   const yearNow       = new Date().getFullYear();
 
-  // --- Build items table rows with ABSOLUTE image URLs ---
+  // --- Build items table rows with product images ---
+  // IMPORTANT:
+  // - Most email clients block `data:image/...` URLs.
+  // - If product images are stored as base64 (data URLs), we embed them as inline
+  //   CID attachments via Resend, so they can render inside the email.
+  // Docs: https://resend.com/docs/dashboard/emails/embed-inline-images
+  const inlineAttachments = [];
+
+  function dataUrlToCidAttachment(dataUrl, contentId, fallbackExt = 'png') {
+    const m = String(dataUrl || '').match(/^data:([^;]+);base64,(.+)$/);
+    if (!m) return null;
+    const mime = m[1] || 'image/png';
+    const base64 = m[2] || '';
+
+    // Safety: avoid huge emails
+    // (Resend max email size is 40MB including base64 attachments)
+    const approxBytes = Math.floor((base64.length * 3) / 4);
+    if (approxBytes > 2_500_000) return null; // ~2.5MB per image cap
+
+    const ext = (mime.split('/')[1] || fallbackExt).replace(/[^a-z0-9]/gi, '') || fallbackExt;
+
+    return {
+      filename: `product-${contentId}.${ext}`,
+      content: base64,
+      contentId
+    };
+  }
+
   const itemsHTML = cartItems.length > 0
-    ? cartItems.map(item => {
-        const itemPrice = Number(item.price || 0);  // already in Naira (frontend cart stores Naira)
+    ? cartItems.map((item, idx) => {
+        const itemPrice = Number(item.price || 0);  // already in Naira
         const qty       = Number(item.quantity || 1);
         const lineTotal = itemPrice * qty;
-        
-        // ✅ FIX: Convert image to absolute URL.
-        // base64 data: URIs are blocked by virtually all email clients (Gmail, Outlook).
-        // If the stored image is base64, skip it and use a branded placeholder instead.
-        const rawImagePath = item.image || '';
-        const isBase64 = rawImagePath.startsWith('data:');
-        const absoluteImageUrl = isBase64 ? '' : resolveImageUrl(rawImagePath);
-        
-        const imgSrc = absoluteImageUrl
-          ? `<img src="${absoluteImageUrl}" alt="${item.name || 'Product'}"
-                  style="width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid #e8e8e8;" />`
-          : '<div style="width:60px;height:60px;background:#f5f0ff;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#8b5cf6;border:1px solid #e8e8e8;">🛍️</div>';
+
+        const rawImagePath = String(item.image || '');
+        const isDataUrl = rawImagePath.startsWith('data:');
+
+        let imgHtml = '';
+
+        if (isDataUrl) {
+          const contentId = `prodimg-${idx + 1}`;
+          const attachment = dataUrlToCidAttachment(rawImagePath, contentId);
+          if (attachment) {
+            inlineAttachments.push(attachment);
+            imgHtml = `<img src="cid:${contentId}" alt="${item.name || 'Product'}"
+                    style="width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid #e8e8e8;" />`;
+          }
+        }
+
+        // If not data-url (or attachment was too big), use normal public URL.
+        if (!imgHtml) {
+          const absoluteImageUrl = resolveImageUrl(rawImagePath);
+          imgHtml = absoluteImageUrl
+            ? `<img src="${absoluteImageUrl}" alt="${item.name || 'Product'}"
+                    style="width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid #e8e8e8;" />`
+            : '<div style="width:60px;height:60px;background:#f5f0ff;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#8b5cf6;border:1px solid #e8e8e8;">🛍️</div>';
+        }
 
         return `
           <tr>
-            <td style="padding:10px 8px;border-bottom:1px solid #f0f0f0;vertical-align:middle;">${imgSrc}</td>
+            <td style="padding:10px 8px;border-bottom:1px solid #f0f0f0;vertical-align:middle;">${imgHtml}</td>
             <td style="padding:10px 8px;border-bottom:1px solid #f0f0f0;vertical-align:middle;font-size:14px;color:#333;">
               ${item.name || 'Item'}
             </td>
@@ -1740,7 +1789,9 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
     from:    MAIL_FROM,
     to:      [toEmail],
     subject: '✅ Order Confirmed! - FortuneHub',
-    html:    customerEmailHTML
+    html:    customerEmailHTML,
+    // If product images were base64, we embedded them as inline CID attachments.
+    ...(inlineAttachments.length ? { attachments: inlineAttachments } : {})
   });
 
   console.log('✅ Customer email sent:', customerEmailResp?.id || '(no id)');
@@ -1752,7 +1803,8 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
         from:    MAIL_FROM,
         to:      [OWNER_EMAIL],
         subject: `🔔 New Order #${reference} - ${customerName}`,
-        html:    ownerEmailHTML
+        html:    ownerEmailHTML,
+        ...(inlineAttachments.length ? { attachments: inlineAttachments } : {})
       });
       console.log('✅ Owner email sent:', ownerEmailResp?.id || '(no id)');
     } catch (ownerEmailError) {
