@@ -808,6 +808,23 @@ app.get('/api/admin/payments/:id', verifyAdmin, async (req, res) => {
   }
 });
 
+
+// Admin: Delete a single transaction by ID
+app.delete('/api/admin/payments/:id', verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const payment = await Payment.findByIdAndDelete(id);
+    if (!payment) {
+      return res.status(404).json({ success: false, message: 'Transaction not found' });
+    }
+    console.log(`✅ Deleted transaction: ${id}`);
+    res.json({ success: true, message: 'Transaction deleted successfully' });
+  } catch (error) {
+    console.error('❌ Error deleting transaction:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // Admin: list last 50 payments (kept for backward compatibility)
 app.get('/api/payments', async (req, res) => {
   try {
@@ -1345,66 +1362,67 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
               <div class="email-body">
 
                 <!-- ══════════ HEADER ══════════ -->
-                <div class="header">
-                  <div class="checkmark">✅</div>
-                  <h1>Order Confirmed!</h1>
-                  <p>Thank you for shopping with <strong>FortuneHub</strong></p>
-                </div>
+                <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                       style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);background-color:#667eea;">
+                  <tr>
+                    <td align="center" style="padding:36px 24px 28px;text-align:center;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);background-color:#667eea;">
+                      <!--[if mso]><table><tr><td style="background:#667eea;padding:36px 24px 28px;text-align:center;"><![endif]-->
+                      <div style="font-size:40px;line-height:1;margin-bottom:10px;">✅</div>
+                      <h1 style="margin:0;padding:0;color:#ffffff;font-size:26px;font-weight:800;letter-spacing:-0.5px;font-family:'Segoe UI',Arial,sans-serif;">Order Confirmed!</h1>
+                      <p style="margin:8px 0 0;padding:0;color:rgba(255,255,255,0.88);font-size:14px;font-family:'Segoe UI',Arial,sans-serif;">Thank you for shopping with <strong style="color:#ffffff;">FortuneHub</strong></p>
+                      <!--[if mso]></td></tr></table><![endif]-->
+                    </td>
+                  </tr>
+                </table>
 
                 <!-- ══════════ BODY ══════════ -->
-                <div class="content">
-                  <p class="greeting">Hi ${customerName},</p>
-                  <p class="intro">
+                <div style="padding:28px 28px 8px;">
+                  <p style="font-size:16px;color:#1f2937;margin:0 0 6px;font-weight:600;font-family:'Segoe UI',Arial,sans-serif;">Hi ${customerName},</p>
+                  <p style="font-size:14px;color:#6b7280;margin:0 0 22px;line-height:1.6;font-family:'Segoe UI',Arial,sans-serif;">
                     Thank you for your purchase! Your payment was successful
                     and your order is being processed.
                     ${customerPhone ? `<br>We'll keep you updated on <strong>${customerPhone}</strong>.` : ''}
                   </p>
 
                   <!-- Reference Block -->
-                  <div class="ref-box">
+                  <div style="background:#f8faff;background:linear-gradient(135deg,#f8faff 0%,#fef3ff 100%);border:1px solid #e0e7ff;border-left:4px solid #667eea;border-radius:8px;padding:14px 16px;margin-bottom:22px;">
                     <table>
                       <tr>
-                        <td class="lbl">Order Reference:</td>
-                        <td><strong>${reference}</strong></td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Order Reference:</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;"><strong>${reference}</strong></td>
                       </tr>
                       <tr>
-                        <td class="lbl">Date &amp; Time:</td>
-                        <td>${dateFormatted}</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Date &amp; Time:</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;">${dateFormatted}</td>
                       </tr>
                       <tr>
-                        <td class="lbl">Currency:</td>
-                        <td>${currency || 'NGN'}</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Currency:</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;">${currency || 'NGN'}</td>
                       </tr>
                       <tr>
-                        <td class="lbl">Status:</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Status:</td>
                         <td>
-                          <span style="display:inline-block;background:#d1fae5;color:#065f46;
-                                       padding:2px 10px;border-radius:20px;font-size:12px;
-                                       font-weight:700;">
-                            ✔ CONFIRMED
-                          </span>
+                          <span style="display:inline-block;background-color:#d1fae5;color:#065f46;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:700;font-family:'Segoe UI',Arial,sans-serif;">✔ CONFIRMED</span>
                         </td>
                       </tr>
                       ${shippingState ? `
                       <tr>
-                        <td class="lbl">Delivery State:</td>
-                        <td>${shippingState}</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Delivery State:</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;">${shippingState}</td>
                       </tr>` : ''}
                     </table>
                   </div>
 
                   <!-- ── Items ── -->
-                  <div class="section-title">
-                    <span>🛍️</span> Your Items
-                  </div>
+                  <p style="font-size:15px;font-weight:700;color:#1f2937;margin:0 0 10px;padding-bottom:6px;border-bottom:2px solid #f0f0f0;font-family:'Segoe UI',Arial,sans-serif;">🛍️ Your Items</p>
 
-                  <table class="items-table" style="margin-bottom:0;">
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;margin-bottom:0;">
                     <thead>
-                      <tr>
-                        <th style="width:70px;">Image</th>
-                        <th>Product</th>
-                        <th style="width:50px;text-align:center;">Qty</th>
-                        <th style="width:110px;text-align:right;">Price</th>
+                      <tr style="background-color:#667eea;">
+                        <th style="width:70px;padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:left;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Image</th>
+                        <th style="padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:left;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Product</th>
+                        <th style="width:50px;padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:center;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Qty</th>
+                        <th style="width:110px;padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:right;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Price</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1413,43 +1431,42 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
                   </table>
 
                   <!-- ── Totals ── -->
-                  <div class="totals-box">
+                  <div style="background-color:#f8faff;border:1px solid #e9d5ff;border-radius:8px;padding:14px 16px;margin:14px 0 22px;">
                     <table>
-                      ${cartItems.length > 0 ? `
+                      \${cartItems.length > 0 ? `
                       <tr>
-                        <td class="lbl">Subtotal:</td>
-                        <td class="val">${formatNaira(displaySubtotal)}</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">Subtotal:</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">\${formatNaira(displaySubtotal)}</td>
                       </tr>
                       <tr>
-                        <td class="lbl">${shippingLabel}:</td>
-                        <td class="val">${formatNaira(derivedShippingFee)}</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">\${shippingLabel}:</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">\${formatNaira(derivedShippingFee)}</td>
                       </tr>` : ''}
-                      <tr class="total-row">
-                        <td class="lbl">TOTAL PAID:</td>
-                        <td class="val">${formatNaira(amountNaira)}</td>
+                      <tr>
+                        <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">TOTAL PAID:</td>
+                        <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;text-align:right;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">\${formatNaira(amountNaira)}</td>
                       </tr>
                     </table>
                   </div>
 
                   <!-- ── What's Next ── -->
-                  <div class="next-box">
+                  <div style="background-color:#faf5ff;border:1px solid #e9d5ff;border-radius:8px;padding:14px 16px;margin-bottom:24px;">
                     <p>
-                      <strong>📦 What's Next?</strong><br>
-                      Your order will be processed and shipped soon.
-                      We'll send you a tracking number once it's dispatched.
+                      <strong style="color:#7c3aed;font-family:'Segoe UI',Arial,sans-serif;">📦 What's Next?</strong><br>
+                      <span style="font-size:14px;color:#6b21a8;line-height:1.6;font-family:'Segoe UI',Arial,sans-serif;">Your order will be processed and shipped soon. We'll send you a tracking number once it's dispatched.</span>
                     </p>
                   </div>
 
-                </div><!-- /.content -->
+                </div><!-- /.content-end -->
 
                 <!-- ══════════ FOOTER ══════════ -->
-                <div class="footer">
-                  <p>Need help? Reply to this email${OWNER_EMAIL ? ` or contact us at <a href="mailto:${OWNER_EMAIL}">${OWNER_EMAIL}</a>` : ''}.</p>
-                  <p>Order Reference: <strong>${reference}</strong></p>
-                  <p class="brand">© ${yearNow} FortuneHub. All rights reserved.</p>
+                <div style="background-color:#f8faff;border-top:1px solid #e9d5ff;padding:18px 24px;text-align:center;">
+                  <p style="margin:3px 0;font-size:12px;color:#9ca3af;font-family:'Segoe UI',Arial,sans-serif;">Need help? Reply to this email${OWNER_EMAIL ? ` or contact us at <a href="mailto:${OWNER_EMAIL}">${OWNER_EMAIL}</a>` : ''}.</p>
+                  <p style="margin:3px 0;font-size:12px;color:#9ca3af;font-family:'Segoe UI',Arial,sans-serif;">Order Reference: <strong>${reference}</strong></p>
+                  <p style="margin:3px 0;font-size:13px;font-weight:700;color:#6b7280;font-family:'Segoe UI',Arial,sans-serif;">© ${yearNow} FortuneHub. All rights reserved.</p>
                 </div>
 
-              </div><!-- /.email-body -->
+              </div><!-- /.email-body-end -->
             </td>
           </tr>
         </table>
@@ -1656,9 +1673,9 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
                 </div>
 
                 <!-- BODY -->
-                <div class="content">
+                <div style="padding:28px 28px 8px;">
                   <p class="greeting">Hello Admin,</p>
-                  <p class="intro">
+                  <p style="font-size:14px;color:#6b7280;margin:0 0 22px;line-height:1.6;font-family:'Segoe UI',Arial,sans-serif;">
                     A new order has been placed on FortuneHub. Please review the details below and contact the customer to arrange delivery.
                   </p>
 
@@ -1680,8 +1697,8 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
                       </tr>
                       ${shippingState ? `
                       <tr>
-                        <td class="lbl">Delivery State:</td>
-                        <td>${shippingState}</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Delivery State:</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;">${shippingState}</td>
                       </tr>` : ''}
                     </table>
                   </div>
@@ -1691,19 +1708,19 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
                   <div class="info-box">
                     <table>
                       <tr>
-                        <td class="lbl">Order Reference:</td>
-                        <td><strong>${reference}</strong></td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Order Reference:</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;"><strong>${reference}</strong></td>
                       </tr>
                       <tr>
-                        <td class="lbl">Date &amp; Time:</td>
-                        <td>${dateFormatted}</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Date &amp; Time:</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;">${dateFormatted}</td>
                       </tr>
                       <tr>
-                        <td class="lbl">Currency:</td>
-                        <td>${currency || 'NGN'}</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Currency:</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;">${currency || 'NGN'}</td>
                       </tr>
                       <tr>
-                        <td class="lbl">Status:</td>
+                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Status:</td>
                         <td>
                           <span style="display:inline-block;background:#d1fae5;color:#065f46;
                                        padding:2px 10px;border-radius:20px;font-size:12px;
@@ -1719,11 +1736,11 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
                   <div class="section-title">🛍️ Items Ordered</div>
                   <table class="items-table">
                     <thead>
-                      <tr>
-                        <th style="width:70px;">Image</th>
-                        <th>Product</th>
-                        <th style="width:50px;text-align:center;">Qty</th>
-                        <th style="width:110px;text-align:right;">Price</th>
+                      <tr style="background-color:#667eea;">
+                        <th style="width:70px;padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:left;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Image</th>
+                        <th style="padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:left;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Product</th>
+                        <th style="width:50px;padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:center;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Qty</th>
+                        <th style="width:110px;padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:right;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Price</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1732,20 +1749,20 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
                   </table>
 
                   <!-- Order Totals -->
-                  <div class="totals-box">
+                  <div style="background-color:#f8faff;border:1px solid #e9d5ff;border-radius:8px;padding:14px 16px;margin:14px 0 22px;">
                     <table>
-                      ${cartItems.length > 0 ? `
+                      \${cartItems.length > 0 ? `
                       <tr>
-                        <td class="lbl">Subtotal:</td>
-                        <td class="val">${formatNaira(displaySubtotal)}</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">Subtotal:</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">\${formatNaira(displaySubtotal)}</td>
                       </tr>
                       <tr>
-                        <td class="lbl">${shippingLabel}:</td>
-                        <td class="val">${formatNaira(derivedShippingFee)}</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">\${shippingLabel}:</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">\${formatNaira(derivedShippingFee)}</td>
                       </tr>` : ''}
-                      <tr class="total-row">
-                        <td class="lbl">TOTAL PAID:</td>
-                        <td class="val">${formatNaira(amountNaira)}</td>
+                      <tr>
+                        <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">TOTAL PAID:</td>
+                        <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;text-align:right;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">\${formatNaira(amountNaira)}</td>
                       </tr>
                     </table>
                   </div>
@@ -1770,10 +1787,10 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
                 </div>
 
                 <!-- FOOTER -->
-                <div class="footer">
+                <div style="background-color:#f8faff;border-top:1px solid #e9d5ff;padding:18px 24px;text-align:center;">
                   <p>This is an automated notification from FortuneHub order system.</p>
-                  <p>Order Reference: <strong>${reference}</strong></p>
-                  <p class="brand">© ${yearNow} FortuneHub. All rights reserved.</p>
+                  <p style="margin:3px 0;font-size:12px;color:#9ca3af;font-family:'Segoe UI',Arial,sans-serif;">Order Reference: <strong>${reference}</strong></p>
+                  <p style="margin:3px 0;font-size:13px;font-weight:700;color:#6b7280;font-family:'Segoe UI',Arial,sans-serif;">© ${yearNow} FortuneHub. All rights reserved.</p>
                 </div>
 
               </div>
