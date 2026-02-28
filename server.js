@@ -809,6 +809,24 @@ app.get('/api/admin/payments/:id', verifyAdmin, async (req, res) => {
 });
 
 
+// Admin: Clear all transactions (DELETE endpoint)
+// ⚠️ IMPORTANT: This route MUST be defined BEFORE /api/admin/payments/:id
+// Express matches routes in order — if :id comes first, "clear-all" is treated as an ID
+app.delete('/api/admin/payments/clear-all', verifyAdmin, async (req, res) => {
+  try {
+    const result = await Payment.deleteMany({});
+    console.log(`✅ Cleared ${result.deletedCount} transaction(s) from database`);
+    res.json({ 
+      success: true, 
+      message: `Successfully cleared ${result.deletedCount} transaction(s)`,
+      deletedCount: result.deletedCount 
+    });
+  } catch (error) {
+    console.error('❌ Error clearing transactions:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // Admin: Delete a single transaction by ID
 app.delete('/api/admin/payments/:id', verifyAdmin, async (req, res) => {
   try {
@@ -831,22 +849,6 @@ app.get('/api/payments', async (req, res) => {
     const payments = await Payment.find().sort({ createdAt: -1 }).limit(50);
     res.json({ success: true, count: payments.length, data: payments });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// Admin: Clear all transactions (DELETE endpoint)
-app.delete('/api/admin/payments/clear-all', verifyAdmin, async (req, res) => {
-  try {
-    const result = await Payment.deleteMany({});
-    console.log(`✅ Cleared ${result.deletedCount} transaction(s) from database`);
-    res.json({ 
-      success: true, 
-      message: `Successfully cleared ${result.deletedCount} transaction(s)`,
-      deletedCount: result.deletedCount 
-    });
-  } catch (error) {
-    console.error('❌ Error clearing transactions:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
@@ -1433,18 +1435,18 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
                   <!-- ── Totals ── -->
                   <div style="background-color:#f8faff;border:1px solid #e9d5ff;border-radius:8px;padding:14px 16px;margin:14px 0 22px;">
                     <table>
-                      \${cartItems.length > 0 ? `
+                      ${cartItems.length > 0 ? `
                       <tr>
                         <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">Subtotal:</td>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">\${formatNaira(displaySubtotal)}</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">${formatNaira(displaySubtotal)}</td>
                       </tr>
                       <tr>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">\${shippingLabel}:</td>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">\${formatNaira(derivedShippingFee)}</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">${shippingLabel}:</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">${formatNaira(derivedShippingFee)}</td>
                       </tr>` : ''}
                       <tr>
                         <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">TOTAL PAID:</td>
-                        <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;text-align:right;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">\${formatNaira(amountNaira)}</td>
+                        <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;text-align:right;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">${formatNaira(amountNaira)}</td>
                       </tr>
                     </table>
                   </div>
@@ -1751,18 +1753,18 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
                   <!-- Order Totals -->
                   <div style="background-color:#f8faff;border:1px solid #e9d5ff;border-radius:8px;padding:14px 16px;margin:14px 0 22px;">
                     <table>
-                      \${cartItems.length > 0 ? `
+                      ${cartItems.length > 0 ? `
                       <tr>
                         <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">Subtotal:</td>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">\${formatNaira(displaySubtotal)}</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">${formatNaira(displaySubtotal)}</td>
                       </tr>
                       <tr>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">\${shippingLabel}:</td>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">\${formatNaira(derivedShippingFee)}</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">${shippingLabel}:</td>
+                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">${formatNaira(derivedShippingFee)}</td>
                       </tr>` : ''}
                       <tr>
                         <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">TOTAL PAID:</td>
-                        <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;text-align:right;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">\${formatNaira(amountNaira)}</td>
+                        <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;text-align:right;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">${formatNaira(amountNaira)}</td>
                       </tr>
                     </table>
                   </div>
