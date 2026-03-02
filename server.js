@@ -802,7 +802,42 @@ app.get('/api/admin/payments/:id', verifyAdmin, async (req, res) => {
     if (!payment) {
       return res.status(404).json({ success: false, message: 'Payment not found' });
     }
-    res.json({ success: true, data: payment });
+
+    // ✅ FIX: Enrich cart_items with product images from DB.
+    // Images are intentionally stripped from metadata before saving to Paystack (to keep
+    // metadata under 5KB). This restores them so the admin payment detail modal can show
+    // product thumbnails in the Order Items section.
+    const paymentObj = payment.toObject();
+    const cartItems = paymentObj?.metadata?.cart_items;
+    if (Array.isArray(cartItems) && cartItems.length) {
+      const enriched = await Promise.all(cartItems.map(async (item) => {
+        if (item.image) return item; // already has image, skip lookup
+        let prod = null;
+        try {
+          const mongoose = require('mongoose');
+          if (item.id) {
+            // item.id may be a plain ObjectId string or 'db_<ObjectId>'
+            const rawId = String(item.id).replace(/^db_/, '');
+            if (mongoose.Types.ObjectId.isValid(rawId)) {
+              prod = await Product.findById(rawId).select('image images').lean();
+            }
+          }
+          if (!prod && item.name) {
+            prod = await Product.findOne({ name: item.name }).select('image images').lean();
+          }
+        } catch (e) {
+          console.warn('⚠️  Could not enrich cart item image for admin detail view:', e.message);
+        }
+        if (prod) {
+          const img = (Array.isArray(prod.images) && prod.images.find(Boolean)) || prod.image || '';
+          return Object.assign({}, item, { image: img });
+        }
+        return item;
+      }));
+      if (paymentObj.metadata) paymentObj.metadata.cart_items = enriched;
+    }
+
+    res.json({ success: true, data: paymentObj });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
