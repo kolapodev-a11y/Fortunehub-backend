@@ -358,19 +358,6 @@ connectMongo();
 // ===================================================
 // 6) ROUTES
 // ===================================================
-
-// ✅ FIX PERFORMANCE: Add /ping endpoint for external uptime monitors.
-// Since Render free plan spins down after 15 minutes of inactivity,
-// register this URL with a FREE external service to ping every 10–14 minutes:
-//   • UptimeRobot (https://uptimerobot.com) — free, pings every 5 min
-//   • cron-job.org (https://cron-job.org) — free cron HTTP requests
-//   • BetterUptime (https://betterstack.com/better-uptime) — free tier
-// Ping URL: https://fortunehub-backend.onrender.com/ping
-// This prevents the cold-start delay that caused ERR_TIMED_OUT in PageSpeed.
-app.get('/ping', (req, res) => {
-  res.json({ pong: true, timestamp: new Date().toISOString() });
-});
-
 app.get('/', (req, res) => {
   res.json({
     status:    'OK',
@@ -815,42 +802,7 @@ app.get('/api/admin/payments/:id', verifyAdmin, async (req, res) => {
     if (!payment) {
       return res.status(404).json({ success: false, message: 'Payment not found' });
     }
-
-    // ✅ FIX: Enrich cart_items with product images from DB.
-    // Images are intentionally stripped from metadata before saving to Paystack (to keep
-    // metadata under 5KB). This restores them so the admin payment detail modal can show
-    // product thumbnails in the Order Items section.
-    const paymentObj = payment.toObject();
-    const cartItems = paymentObj?.metadata?.cart_items;
-    if (Array.isArray(cartItems) && cartItems.length) {
-      const enriched = await Promise.all(cartItems.map(async (item) => {
-        if (item.image) return item; // already has image, skip lookup
-        let prod = null;
-        try {
-          const mongoose = require('mongoose');
-          if (item.id) {
-            // item.id may be a plain ObjectId string or 'db_<ObjectId>'
-            const rawId = String(item.id).replace(/^db_/, '');
-            if (mongoose.Types.ObjectId.isValid(rawId)) {
-              prod = await Product.findById(rawId).select('image images').lean();
-            }
-          }
-          if (!prod && item.name) {
-            prod = await Product.findOne({ name: item.name }).select('image images').lean();
-          }
-        } catch (e) {
-          console.warn('⚠️  Could not enrich cart item image for admin detail view:', e.message);
-        }
-        if (prod) {
-          const img = (Array.isArray(prod.images) && prod.images.find(Boolean)) || prod.image || '';
-          return Object.assign({}, item, { image: img });
-        }
-        return item;
-      }));
-      if (paymentObj.metadata) paymentObj.metadata.cart_items = enriched;
-    }
-
-    res.json({ success: true, data: paymentObj });
+    res.json({ success: true, data: payment });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -932,10 +884,6 @@ const Product = mongoose.model('Product', productSchema);
 // ===================================================
 
 // GET all products (PUBLIC - used by frontend)
-// ✅ FIX PERFORMANCE: Added Cache-Control header.
-// Products rarely change in real-time, so we allow the browser/CDN to cache
-// for 5 minutes (s-maxage) and reuse stale for 1 minute while revalidating.
-// This reduces repeat requests and improves Lighthouse "Use efficient cache lifetimes" score.
 app.get('/api/products', async (req, res) => {
   try {
     const dbProducts = await Product.find().sort({ createdAt: -1 });
@@ -956,9 +904,6 @@ app.get('/api/products', async (req, res) => {
       statusIndicator: p.statusIndicator
     }));
 
-    // ✅ Cache-Control: public (CDN-cacheable), max-age=300 (5 min browser cache),
-    // s-maxage=300 (5 min CDN cache), stale-while-revalidate=60 (serve stale 1 min)
-    res.set('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=60');
     res.json({ success: true, count: mapped.length, data: mapped });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -1894,47 +1839,6 @@ async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, pa
 }
 
 // ===================================================
-// 11) KEEP-ALIVE SELF-PING (Render Free Plan)
-// ===================================================
-// ✅ FIX: On Render free plan, the server spins down after 15 minutes of inactivity.
-// This causes the ERR_TIMED_OUT error visible in your PageSpeed screenshots.
-//
-// RECOMMENDED FIX (external, more reliable):
-//   Register your /ping endpoint on a FREE external uptime monitor:
-//   • UptimeRobot: https://uptimerobot.com  (5-min interval, free)
-//   • cron-job.org: https://cron-job.org   (custom interval, free)
-//   Ping URL: https://fortunehub-backend.onrender.com/ping
-//
-// BUILT-IN SELF-PING (backup, every 14 minutes):
-//   The server also pings itself as a backup. Note: Render may detect
-//   self-pings and still spin down, so use an EXTERNAL monitor as primary.
-
-const SELF_PING_INTERVAL_MS = 14 * 60 * 1000; // 14 minutes
-const SELF_PING_URL = `http://localhost:${process.env.PORT || 10000}/ping`;
-
-function startSelfPing() {
-  // Only run self-ping in production (not needed locally)
-  if (process.env.NODE_ENV !== 'production' && !process.env.RENDER) {
-    return;
-  }
-
-  const https_module = require('http'); // use http since we're hitting localhost
-  setInterval(() => {
-    const pingReq = https_module.get(SELF_PING_URL, (res) => {
-      console.log(`🏓 Self-ping: ${res.statusCode} — server is awake (${new Date().toISOString()})`);
-    });
-    pingReq.on('error', (err) => {
-      console.warn('⚠️  Self-ping failed (non-fatal):', err.message);
-    });
-    pingReq.end();
-  }, SELF_PING_INTERVAL_MS);
-
-  console.log(`🏓 Self-ping started (every ${SELF_PING_INTERVAL_MS / 60000} minutes)`);
-  console.log('💡 TIP: Also register https://fortunehub-backend.onrender.com/ping');
-  console.log('💡      on UptimeRobot (https://uptimerobot.com) for more reliable keep-alive.');
-}
-
-// ===================================================
 // 11) START SERVER
 // ===================================================
 app.listen(PORT, () => {
@@ -1974,9 +1878,6 @@ app.listen(PORT, () => {
 
   console.log('🚀 ================================');
   console.log('');
-
-  // ✅ Start self-ping after server is listening
-  startSelfPing();
 });
 
 // Graceful shutdown
