@@ -697,7 +697,10 @@ app.post('/api/payment/verify', async (req, res) => handlePaymentVerification(re
 //      Fixes Paystack popup "We could not start this transaction"
 //      by creating a transaction on the server first.
 // ===================================================
-app.post('/api/payment/initialize', async (req, res) => {
+// ✅ CHANGE (2026-03-18): Require buyer login before they can pay.
+// Browsing products remains public, but payment initialization now needs a valid JWT.
+// Frontend should send: Authorization: Bearer <token>
+app.post('/api/payment/initialize', authMiddleware, async (req, res) => {
   try {
     if (!PAYSTACK_SECRET_KEY) {
       console.error('❌ PAYSTACK_SECRET_KEY is not set in environment variables!');
@@ -714,23 +717,25 @@ app.post('/api/payment/initialize', async (req, res) => {
       console.warn('⚠️  It should match the same Paystack account as your PAYSTACK_SECRET_KEY.');
     }
 
-    const email = String(req.body?.email || '').trim();
+    // Since authMiddleware already verified the JWT, we can trust req.user
+    const buyerEmailFromToken = String(req.user?.email || '').trim();
+    const buyerIdFromToken = req.user?.id || null;
+
+    const emailFromBody = String(req.body?.email || '').trim();
+    const email = emailFromBody || buyerEmailFromToken;
+
+    // Prevent paying with a different email than the logged-in account
+    if (emailFromBody && buyerEmailFromToken && emailFromBody.toLowerCase() !== buyerEmailFromToken.toLowerCase()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment email must match your logged-in account email'
+      });
+    }
+
     const amountNaira = Number(req.body?.amount);
     const rawMetadata = req.body?.metadata || {};
 
-    let userId = null;
-    const authHeader = req.headers.authorization || '';
-    if (authHeader.startsWith('Bearer ')) {
-      try {
-        const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET);
-        userId = decoded.id || null;
-      } catch (_) {}
-    }
-
-    if (!userId && email) {
-      const foundUser = await User.findOne({ email: email.toLowerCase() }).select('_id');
-      if (foundUser) userId = foundUser._id;
-    }
+    const userId = buyerIdFromToken;
 
     // ✅ FIX: Strip base64 images from cart_items before sending to Paystack.
     // Paystack rejects metadata larger than ~5KB. Admin-panel products store images
@@ -1099,12 +1104,18 @@ app.get('/api/admin/payments', verifyAdmin, async (req, res) => {
       .skip((page - 1) * limit);
 
     // Calculate statistics
+    // ✅ CHANGE (2026-03-18): Total revenue must only include SUCCESS payments.
+    // Pending/failed attempts should not be counted as revenue.
     const stats = await Payment.aggregate([
       { $match: query },
       {
         $group: {
           _id: null,
-          totalAmount: { $sum: '$amount' },
+          totalAmount: {
+            $sum: {
+              $cond: [{ $eq: ['$status', 'success'] }, '$amount', 0]
+            }
+          },
           totalCount:  { $sum: 1 },
           successCount: { $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] } },
           pendingCount: { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
@@ -1122,7 +1133,7 @@ app.get('/api/admin/payments', verifyAdmin, async (req, res) => {
         limit,
         totalPages: Math.ceil(total / limit)
       },
-      stats: stats[0] || { totalAmount: 0, successCount: 0, pendingCount: 0 }
+      stats: stats[0] || { totalAmount: 0, totalCount: 0, successCount: 0, pendingCount: 0, failedCount: 0 }
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
