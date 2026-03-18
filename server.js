@@ -553,13 +553,19 @@ app.post('/api/auth/google', async (req, res) => {
         email: email.toLowerCase(),
         name: name || email.split('@')[0],
         picture: picture || '',
-        authProvider: 'google'
+        authProvider: 'google',
+        isEmailVerified: true  // ✅ FIX: Google already verifies the email
       });
       console.log(`✅ New Google user registered: ${email}`);
     } else {
+      // ✅ FIX: Update googleId and mark as verified (Google confirms the email)
       user.googleId = googleId;
       user.picture = picture || user.picture;
       user.name = name || user.name;
+      // If this was an unverified email account, link it to Google and verify it
+      if (!user.isEmailVerified) user.isEmailVerified = true;
+      // If account was email-based, keep authProvider but allow Google login
+      if (user.authProvider === 'email') user.authProvider = 'google';
       await user.save();
     }
 
@@ -604,9 +610,18 @@ app.post('/api/auth/signup', async (req, res) => {
 
     const existing = await User.findOne({ email: String(email).toLowerCase() });
     if (existing) {
+      // ✅ FIX: Give specific message for Google-registered accounts
+      if (existing.authProvider === 'google') {
+        return res.status(409).json({
+          success: false,
+          isGoogleAccount: true,
+          message: 'This email is registered with Google Sign-In. Please click "Continue with Google" to sign in.'
+        });
+      }
       return res.status(409).json({
         success: false,
         requiresVerification: !existing.isEmailVerified && existing.authProvider === 'email',
+        email: existing.email,
         message: 'An account with this email already exists. Please sign in.'
       });
     }
@@ -658,9 +673,69 @@ app.post('/api/auth/signin', async (req, res) => {
   try {
     const { email, password } = req.body || {};
 
+    // ✅ FIX: Properly closed if-block (was missing closing brace — caused dead routes)
     if (!email || !password) {
       return res.status(400).json({ success: false, message: 'Email and password are required' });
+    }
 
+    const user = await User.findOne({ email: String(email).toLowerCase().trim() });
+
+    if (!user) {
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
+
+    // ✅ FIX: Detect Google-only accounts and guide user to Google Sign-In
+    if (user.authProvider === 'google' && !user.password) {
+      return res.status(400).json({
+        success: false,
+        isGoogleAccount: true,
+        message: 'This account was registered with Google. Please sign in using the "Continue with Google" button.'
+      });
+    }
+
+    if (!user.password) {
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
+
+    if (user.authProvider === 'email' && !user.isEmailVerified) {
+      return res.status(403).json({
+        success: false,
+        requiresVerification: true,
+        email: user.email,
+        message: 'Please verify your email before signing in.'
+      });
+    }
+
+    const valid = await bcrypt.compare(String(password), user.password);
+    if (!valid) {
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
+
+    const token = issueJWT(user);
+    return res.json({
+      success: true,
+      token,
+      user: {
+        id: user._id,
+        email: user.email,
+        name: user.name,
+        picture: user.picture || '',
+        authProvider: user.authProvider,
+        phone: user.phone || ''
+      }
+    });
+  } catch (error) {
+    console.error('❌ Signin error:', error?.message || error);
+    return res.status(500).json({ success: false, message: 'Signin failed: ' + error.message });
+  }
+});
+
+// ===================================================
+// AUTH ROUTES — Email Verification & Password Reset
+// ✅ FIX: These routes were accidentally nested inside
+//         /api/auth/signin's if-block (dead code).
+//         They are now properly registered at top level.
+// ===================================================
 
 app.get('/api/auth/verify-email', async (req, res) => {
   try {
@@ -895,44 +970,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
     return res.status(500).json({ success: false, message: 'Reset failed' });
   }
 });
-    }
 
-    const user = await User.findOne({ email: String(email).toLowerCase().trim() });
-    if (!user || !user.password) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
-    }
-
-    if (user.authProvider === 'email' && !user.isEmailVerified) {
-      return res.status(403).json({
-        success: false,
-        requiresVerification: true,
-        message: 'Please verify your email before signing in.'
-      });
-    }
-
-    const valid = await bcrypt.compare(String(password), user.password);
-    if (!valid) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
-    }
-
-    const token = issueJWT(user);
-    return res.json({
-      success: true,
-      token,
-      user: {
-        id: user._id,
-        email: user.email,
-        name: user.name,
-        picture: user.picture || '',
-        authProvider: user.authProvider,
-        phone: user.phone || ''
-      }
-    });
-  } catch (error) {
-    console.error('❌ Signin error:', error?.message || error);
-    return res.status(500).json({ success: false, message: 'Signin failed: ' + error.message });
-  }
-});
 
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
   try {
@@ -959,6 +997,11 @@ app.patch('/api/auth/me', authMiddleware, async (req, res) => {
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
+});
+
+// ✅ NEW: Quick session check endpoint — used by frontend to validate JWT on page load
+app.get('/api/auth/check-session', authMiddleware, (req, res) => {
+  return res.json({ success: true, user: req.user });
 });
 
 app.get('/api/transactions/my', authMiddleware, async (req, res) => {
@@ -1069,7 +1112,10 @@ app.post('/api/payment/verify', async (req, res) => handlePaymentVerification(re
 //      Fixes Paystack popup "We could not start this transaction"
 //      by creating a transaction on the server first.
 // ===================================================
-app.post('/api/payment/initialize', async (req, res) => {
+app.post('/api/payment/initialize', authMiddleware, async (req, res) => {
+  // ✅ FIX: Authentication is now required before checkout.
+  // The authMiddleware above returns 401 if no valid JWT is present,
+  // preventing guest purchases. Frontend must show sign-in modal on 401.
   try {
     if (!PAYSTACK_SECRET_KEY) {
       console.error('❌ PAYSTACK_SECRET_KEY is not set in environment variables!');
