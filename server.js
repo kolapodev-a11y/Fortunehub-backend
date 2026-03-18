@@ -194,7 +194,21 @@ const userSchema = new mongoose.Schema({
   picture:      { type: String, default: '' },
   password:     { type: String, default: null },
   authProvider: { type: String, enum: ['google', 'email'], required: true },
-  phone:        { type: String, default: '' },
+phone:        { type: String, default: '' },
+
+  // Email verification (for authProvider='email')
+  isEmailVerified:               { type: Boolean, default: false },
+  emailVerificationCodeHash:     { type: String,  default: null },
+  emailVerificationCodeExpires:  { type: Date,    default: null },
+  emailVerificationTokenHash:    { type: String,  default: null },
+  emailVerificationTokenExpires: { type: Date,    default: null },
+
+  // Password reset
+  resetPasswordCodeHash:         { type: String,  default: null },
+  resetPasswordCodeExpires:      { type: Date,    default: null },
+  resetPasswordTokenHash:        { type: String,  default: null },
+  resetPasswordTokenExpires:     { type: Date,    default: null },
+
   createdAt:    { type: Date, default: Date.now }
 });
 
@@ -398,6 +412,99 @@ function authMiddleware(req, res, next) {
   }
 }
 
+
+
+function make6DigitCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function sha256(input) {
+  return crypto.createHash('sha256').update(String(input)).digest('hex');
+}
+
+function json_escape(s) {
+  return JSON.stringify(String(s || ''));
+}
+
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function getApiBaseUrl(req) {
+  const env = String(process.env.API_BASE_URL || '').trim();
+  if (env) return env.replace(/\/$/, '');
+  try {
+    const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+    const host  = req.get('host');
+    return `${proto}://${host}`;
+  } catch {
+    return `http://localhost:${PORT}`;
+  }
+}
+
+function getFrontendBaseUrl(req) {
+  const envUrl = String(process.env.FRONTEND_BASE_URL || process.env.FRONTEND_URL || '').trim();
+  if (envUrl) return envUrl.replace(/\/$/, '');
+
+  const origin = String(req?.headers?.origin || '').trim();
+  if (origin && origin !== 'null') return origin.replace(/\/$/, '');
+
+  return 'https://fortunehub.name.ng';
+}
+
+async function sendVerificationEmail({ req, toEmail, name, code, token }) {
+  if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY is missing (cannot send email)');
+  const apiBase = getApiBaseUrl(req);
+  const verifyUrl = `${apiBase}/api/auth/verify-email?token=${encodeURIComponent(token)}`;
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;line-height:1.5;">
+      <h2 style="color:#1e3a8a;margin:0 0 10px;">Verify your FortuneHub account</h2>
+      <p style="margin:0 0 12px;">Hi ${escapeHtml(name || 'there')},</p>
+      <p style="margin:0 0 12px;">Use this 6-digit verification code:</p>
+      <div style="font-size:28px;font-weight:800;letter-spacing:6px;background:#f0f7ff;border:1px solid #b8d4f8;border-radius:12px;padding:14px 16px;text-align:center;">${code}</div>
+      <p style="margin:14px 0 8px;">Or verify instantly with this link:</p>
+      <p style="margin:0 0 14px;"><a href="${verifyUrl}" style="color:#1e3a8a;font-weight:800;">Verify my email</a></p>
+      <p style="color:#6b7280;font-size:13px;margin:0;">If you didn’t create an account, you can ignore this email.</p>
+    </div>
+  `;
+
+  await resend.emails.send({
+    from: MAIL_FROM,
+    to: [toEmail],
+    subject: 'Verify your FortuneHub email',
+    html
+  });
+}
+
+async function sendPasswordResetEmail({ req, toEmail, code, token }) {
+  if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY is missing (cannot send email)');
+  const apiBase = getApiBaseUrl(req);
+  const resetUrl = `${apiBase}/api/auth/reset-password?token=${encodeURIComponent(token)}`;
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;line-height:1.5;">
+      <h2 style="color:#1e3a8a;margin:0 0 10px;">Reset your FortuneHub password</h2>
+      <p style="margin:0 0 12px;">Use this 6-digit reset code:</p>
+      <div style="font-size:28px;font-weight:800;letter-spacing:6px;background:#fff8e1;border:1px solid #ffe082;border-radius:12px;padding:14px 16px;text-align:center;">${code}</div>
+      <p style="margin:14px 0 8px;">Or use this reset link:</p>
+      <p style="margin:0 0 14px;"><a href="${resetUrl}" style="color:#1e3a8a;font-weight:800;">Reset password</a></p>
+      <p style="color:#6b7280;font-size:13px;margin:0;">If you didn’t request this, ignore this email.</p>
+    </div>
+  `;
+
+  await resend.emails.send({
+    from: MAIL_FROM,
+    to: [toEmail],
+    subject: 'FortuneHub password reset',
+    html
+  });
+}
 function issueJWT(user) {
   return jwt.sign(
     {
@@ -478,12 +585,17 @@ app.post('/api/auth/google', async (req, res) => {
   }
 });
 
+
 app.post('/api/auth/signup', async (req, res) => {
   try {
-    const { name, email, password } = req.body || {};
+    const { name, email, password, confirmPassword } = req.body || {};
 
     if (!name || !email || !password) {
       return res.status(400).json({ success: false, message: 'Name, email, and password are required' });
+    }
+
+    if (confirmPassword != null && String(confirmPassword) !== String(password)) {
+      return res.status(400).json({ success: false, message: 'Passwords do not match' });
     }
 
     if (String(password).length < 6) {
@@ -494,36 +606,53 @@ app.post('/api/auth/signup', async (req, res) => {
     if (existing) {
       return res.status(409).json({
         success: false,
+        requiresVerification: !existing.isEmailVerified && existing.authProvider === 'email',
         message: 'An account with this email already exists. Please sign in.'
       });
     }
 
     const hashed = await bcrypt.hash(String(password), 12);
+
+    const code  = make6DigitCode();
+    const token = crypto.randomBytes(32).toString('hex');
+
     const user = await User.create({
       name: String(name).trim(),
       email: String(email).toLowerCase().trim(),
       password: hashed,
-      authProvider: 'email'
+      authProvider: 'email',
+      isEmailVerified: false,
+      emailVerificationCodeHash: sha256(code),
+      emailVerificationCodeExpires: new Date(Date.now() + 15 * 60 * 1000),
+      emailVerificationTokenHash: sha256(token),
+      emailVerificationTokenExpires: new Date(Date.now() + 24 * 60 * 60 * 1000)
     });
 
-    const token = issueJWT(user);
+    try {
+      await sendVerificationEmail({ req, toEmail: user.email, name: user.name, code, token });
+    } catch (mailErr) {
+      console.error('❌ Verification email failed:', mailErr?.message || mailErr);
+      return res.status(201).json({
+        success: true,
+        requiresVerification: true,
+        email: user.email,
+        message: 'Account created, but we could not send a verification email. Please try again later.'
+      });
+    }
+
     return res.status(201).json({
       success: true,
-      token,
-      user: {
-        id: user._id,
-        email: user.email,
-        name: user.name,
-        picture: '',
-        authProvider: 'email',
-        phone: ''
-      }
+      requiresVerification: true,
+      email: user.email,
+      message: 'Verification code sent. Please check your email (including Spam).'
     });
+
   } catch (error) {
     console.error('❌ Signup error:', error?.message || error);
     return res.status(500).json({ success: false, message: 'Signup failed: ' + error.message });
   }
 });
+
 
 app.post('/api/auth/signin', async (req, res) => {
   try {
@@ -531,11 +660,254 @@ app.post('/api/auth/signin', async (req, res) => {
 
     if (!email || !password) {
       return res.status(400).json({ success: false, message: 'Email and password are required' });
+
+
+app.get('/api/auth/verify-email', async (req, res) => {
+  try {
+    const token = String(req.query?.token || '').trim();
+    if (!token) return res.status(400).send('Missing token');
+
+    const user = await User.findOne({
+      emailVerificationTokenHash: sha256(token),
+      emailVerificationTokenExpires: { $gt: new Date() }
+    });
+
+    if (!user) return res.status(400).send('Invalid or expired verification token');
+
+    user.isEmailVerified = true;
+    user.emailVerificationCodeHash = null;
+    user.emailVerificationCodeExpires = null;
+    user.emailVerificationTokenHash = null;
+    user.emailVerificationTokenExpires = null;
+    await user.save();
+
+    const frontend = getFrontendBaseUrl(req);
+    return res.redirect(`${frontend}/?email_verified=1`);
+  } catch (err) {
+    console.error('❌ verify-email error:', err);
+    return res.status(500).send('Verification failed');
+  }
+});
+
+app.post('/api/auth/verify-email-code', async (req, res) => {
+  try {
+    const email = String(req.body?.email || '').toLowerCase().trim();
+    const code  = String(req.body?.code  || '').trim();
+
+    if (!email || !/^\d{6}$/.test(code)) {
+      return res.status(400).json({ success: false, message: 'Email and 6-digit code are required' });
+    }
+
+    const user = await User.findOne({
+      email,
+      authProvider: 'email',
+      isEmailVerified: false,
+      emailVerificationCodeHash: sha256(code),
+      emailVerificationCodeExpires: { $gt: new Date() }
+    });
+
+    if (!user) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired code' });
+    }
+
+    user.isEmailVerified = true;
+    user.emailVerificationCodeHash = null;
+    user.emailVerificationCodeExpires = null;
+    user.emailVerificationTokenHash = null;
+    user.emailVerificationTokenExpires = null;
+    await user.save();
+
+    return res.json({ success: true, message: 'Email verified successfully' });
+  } catch (err) {
+    console.error('❌ verify-email-code error:', err);
+    return res.status(500).json({ success: false, message: 'Verification failed' });
+  }
+});
+
+app.post('/api/auth/resend-verification', async (req, res) => {
+  try {
+    const email = String(req.body?.email || '').toLowerCase().trim();
+    if (!email) return res.status(400).json({ success: false, message: 'Email is required' });
+
+    const user = await User.findOne({ email, authProvider: 'email' });
+
+    // Always respond success to reduce account enumeration
+    if (!user) {
+      return res.json({ success: true, message: 'If the email exists, a new code has been sent.' });
+    }
+
+    if (user.isEmailVerified) {
+      return res.json({ success: true, message: 'Email is already verified. Please sign in.' });
+    }
+
+    const code  = make6DigitCode();
+    const token = crypto.randomBytes(32).toString('hex');
+
+    user.emailVerificationCodeHash = sha256(code);
+    user.emailVerificationCodeExpires = new Date(Date.now() + 15 * 60 * 1000);
+    user.emailVerificationTokenHash = sha256(token);
+    user.emailVerificationTokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await user.save();
+
+    await sendVerificationEmail({ req, toEmail: user.email, name: user.name, code, token });
+
+    return res.json({ success: true, message: 'Verification email sent.' });
+  } catch (err) {
+    console.error('❌ resend-verification error:', err);
+    return res.status(500).json({ success: false, message: 'Could not resend verification email' });
+  }
+});
+
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const email = String(req.body?.email || '').toLowerCase().trim();
+    if (!email) return res.status(400).json({ success: false, message: 'Email is required' });
+
+    const user = await User.findOne({ email, authProvider: 'email' });
+
+    // Always respond success to reduce account enumeration
+    if (!user || !user.password) {
+      return res.json({ success: true, message: 'If that email exists, a reset link/code has been sent.' });
+    }
+
+    const code  = make6DigitCode();
+    const token = crypto.randomBytes(32).toString('hex');
+
+    user.resetPasswordCodeHash = sha256(code);
+    user.resetPasswordCodeExpires = new Date(Date.now() + 15 * 60 * 1000);
+    user.resetPasswordTokenHash = sha256(token);
+    user.resetPasswordTokenExpires = new Date(Date.now() + 60 * 60 * 1000);
+    await user.save();
+
+    await sendPasswordResetEmail({ req, toEmail: user.email, code, token });
+
+    return res.json({ success: true, message: 'If that email exists, a reset link/code has been sent.' });
+  } catch (err) {
+    console.error('❌ forgot-password error:', err);
+    return res.status(500).json({ success: false, message: 'Could not process request' });
+  }
+});
+
+app.get('/api/auth/reset-password', async (req, res) => {
+  const token = String(req.query?.token || '').trim();
+  if (!token) return res.status(400).send('Missing token');
+
+  const apiBase = getApiBaseUrl(req);
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  return res.end(`
+<!doctype html>
+<html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Reset Password • FortuneHub</title>
+<style>
+  body{font-family:Arial,sans-serif;background:#0b1020;color:#111;margin:0;padding:24px;}
+  .card{max-width:520px;margin:40px auto;background:#fff;border-radius:16px;padding:22px 20px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
+  h1{font-size:20px;margin:0 0 12px;color:#1e3a8a}
+  label{display:block;font-weight:700;margin:12px 0 6px}
+  input{width:100%;padding:12px 14px;border:1px solid #ddd;border-radius:12px;font-size:16px}
+  button{margin-top:14px;width:100%;padding:12px 14px;border:none;border-radius:12px;background:#1e3a8a;color:#fff;font-weight:800;font-size:16px;cursor:pointer}
+  small{display:block;margin-top:10px;color:#6b7280;line-height:1.45}
+  .msg{margin-top:10px;font-weight:700}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Reset your password</h1>
+    <form id="f">
+      <label>New password</label>
+      <input id="p1" type="password" minlength="6" required placeholder="Min. 6 characters" />
+      <label>Confirm password</label>
+      <input id="p2" type="password" minlength="6" required placeholder="Re-enter password" />
+      <button type="submit">Update password</button>
+      <div class="msg" id="m"></div>
+      <small>After updating, go back to FortuneHub and sign in.</small>
+    </form>
+  </div>
+<script>
+  const token = ${json_escape(token)};
+  const form = document.getElementById('f');
+  const m = document.getElementById('m');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    m.textContent = '';
+    const p1 = document.getElementById('p1').value;
+    const p2 = document.getElementById('p2').value;
+    if (p1.length < 6) { m.textContent = 'Password must be at least 6 characters'; m.style.color='crimson'; return; }
+    if (p1 !== p2) { m.textContent = 'Passwords do not match'; m.style.color='crimson'; return; }
+    try {
+      const res = await fetch('${apiBase}/api/auth/reset-password', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','Accept':'application/json'},
+        body: JSON.stringify({ token, password: p1 })
+      });
+      const data = await res.json();
+      if (data.success) { m.textContent = 'Password updated successfully.'; m.style.color='#065f46'; }
+      else { m.textContent = data.message || 'Reset failed'; m.style.color='crimson'; }
+    } catch { m.textContent = 'Network error'; m.style.color='crimson'; }
+  });
+</script>
+</body></html>`);
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const token = String(req.body?.token || '').trim();
+    const email = String(req.body?.email || '').toLowerCase().trim();
+    const code  = String(req.body?.code  || '').trim();
+    const password = String(req.body?.password || '');
+
+    if (!password || password.length < 6) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+    }
+
+    let user = null;
+
+    if (token) {
+      user = await User.findOne({
+        resetPasswordTokenHash: sha256(token),
+        resetPasswordTokenExpires: { $gt: new Date() }
+      });
+    } else if (email && /^\d{6}$/.test(code)) {
+      user = await User.findOne({
+        email,
+        resetPasswordCodeHash: sha256(code),
+        resetPasswordCodeExpires: { $gt: new Date() }
+      });
+    } else {
+      return res.status(400).json({ success: false, message: 'Token or (email + 6-digit code) is required' });
+    }
+
+    if (!user) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired reset token/code' });
+    }
+
+    user.password = await bcrypt.hash(password, 12);
+    user.resetPasswordCodeHash = null;
+    user.resetPasswordCodeExpires = null;
+    user.resetPasswordTokenHash = null;
+    user.resetPasswordTokenExpires = null;
+    if (user.authProvider === 'email') user.isEmailVerified = true;
+    await user.save();
+
+    return res.json({ success: true, message: 'Password updated successfully' });
+  } catch (err) {
+    console.error('❌ reset-password error:', err);
+    return res.status(500).json({ success: false, message: 'Reset failed' });
+  }
+});
     }
 
     const user = await User.findOne({ email: String(email).toLowerCase().trim() });
     if (!user || !user.password) {
       return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
+
+    if (user.authProvider === 'email' && !user.isEmailVerified) {
+      return res.status(403).json({
+        success: false,
+        requiresVerification: true,
+        message: 'Please verify your email before signing in.'
+      });
     }
 
     const valid = await bcrypt.compare(String(password), user.password);
