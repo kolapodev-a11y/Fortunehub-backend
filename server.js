@@ -1104,11 +1104,15 @@ app.get('/api/admin/payments', verifyAdmin, async (req, res) => {
       {
         $group: {
           _id: null,
-          totalAmount: { $sum: '$amount' },
-          totalCount:  { $sum: 1 },
-          successCount: { $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] } },
-          pendingCount: { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
-          failedCount:  { $sum: { $cond: [{ $eq: ['$status', 'failed']  }, 1, 0] } }
+          // ✅ FIX: totalAmount counts ALL transactions (including pending/cancelled)
+          // successAmount counts ONLY confirmed successful payments — used as true revenue
+          totalAmount:   { $sum: '$amount' },
+          successAmount: { $sum: { $cond: [{ $eq: ['$status', 'success'] }, '$amount', 0] } },
+          totalCount:    { $sum: 1 },
+          successCount:  { $sum: { $cond: [{ $eq: ['$status', 'success']   }, 1, 0] } },
+          pendingCount:  { $sum: { $cond: [{ $eq: ['$status', 'pending']   }, 1, 0] } },
+          failedCount:   { $sum: { $cond: [{ $eq: ['$status', 'failed']    }, 1, 0] } },
+          cancelledCount:{ $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } }
         }
       }
     ]);
@@ -1122,7 +1126,7 @@ app.get('/api/admin/payments', verifyAdmin, async (req, res) => {
         limit,
         totalPages: Math.ceil(total / limit)
       },
-      stats: stats[0] || { totalAmount: 0, successCount: 0, pendingCount: 0 }
+      stats: stats[0] || { totalAmount: 0, successAmount: 0, successCount: 0, pendingCount: 0, failedCount: 0, cancelledCount: 0 }
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -1177,6 +1181,38 @@ app.get('/api/admin/payments/:id', verifyAdmin, async (req, res) => {
   }
 });
 
+
+// ===================================================
+// CANCEL PAYMENT ROUTE
+// Called by frontend when user closes/cancels Paystack popup
+// Updates status from 'pending' → 'cancelled'
+// ===================================================
+app.patch('/api/payment/cancel', async (req, res) => {
+  try {
+    const { reference } = req.body;
+    if (!reference) {
+      return res.status(400).json({ success: false, message: 'Payment reference is required' });
+    }
+
+    // Only update if currently pending — do NOT downgrade a successful payment
+    const payment = await Payment.findOneAndUpdate(
+      { reference, status: 'pending' },
+      { status: 'cancelled' },
+      { new: true }
+    );
+
+    if (!payment) {
+      // Payment may already be success or doesn't exist — return OK silently
+      return res.json({ success: true, message: 'No pending payment found to cancel (may already be successful)' });
+    }
+
+    console.log(`🚫 Payment cancelled by user: ${reference}`);
+    return res.json({ success: true, message: 'Payment marked as cancelled', reference });
+  } catch (error) {
+    console.error('❌ Cancel payment error:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
 
 // Admin: Clear all transactions (DELETE endpoint)
 // ⚠️ IMPORTANT: This route MUST be defined BEFORE /api/admin/payments/:id
