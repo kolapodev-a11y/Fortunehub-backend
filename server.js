@@ -2,13 +2,75 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const crypto = require('crypto');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
-const { OAuth2Client } = require('google-auth-library');
 const { Resend } = require('resend');
 require('dotenv').config();
 
 const app = express();
+
+// ──────────────────────────────────────────────────────────
+// ✅ SECURITY & PERFORMANCE HEADERS MIDDLEWARE (Security Patch Applied)
+// Fixes Lighthouse Best Practices issues:
+//   ✅ CSP  (High)   — "No CSP found in enforcement mode"
+//   ✅ HSTS (Medium) — "No includeSubDomains / preload directive found"
+//   ✅ COOP (High)   — "No COOP header found"
+//   ✅ X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy
+//
+// NOTE: COOP is "same-origin-allow-popups" (NOT "same-origin") to keep
+//       Paystack checkout popup working correctly.
+// ──────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+
+  // ── HSTS ──────────────────────────────────────────────
+  // Tells browsers to only access the site over HTTPS.
+  res.setHeader(
+    'Strict-Transport-Security',
+    'max-age=31536000; includeSubDomains; preload'
+  );
+
+  // ── COOP ──────────────────────────────────────────────
+  // "same-origin-allow-popups" keeps the Paystack checkout popup working.
+  res.setHeader(
+    'Cross-Origin-Opener-Policy',
+    'same-origin-allow-popups'
+  );
+
+  // ── CSP ───────────────────────────────────────────────
+  res.setHeader(
+    'Content-Security-Policy',
+    [
+      "default-src 'self'",
+      "script-src 'self' https://js.paystack.co 'unsafe-inline'",
+      "style-src 'self' https://cdnjs.cloudflare.com 'unsafe-inline'",
+      "font-src 'self' https://cdnjs.cloudflare.com",
+      "img-src 'self' data: https:",
+      "connect-src 'self' https://api.paystack.co https://fortunehub-backend.onrender.com",
+      "frame-src https://checkout.paystack.com",
+      "object-src 'none'",
+      "upgrade-insecure-requests",
+    ].join('; ')
+  );
+
+  // ── X-Content-Type-Options ────────────────────────────
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+
+  // ── X-Frame-Options ───────────────────────────────────
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+
+  // ── Referrer-Policy ───────────────────────────────────
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+
+  // ── Permissions-Policy ────────────────────────────────
+  res.setHeader(
+    'Permissions-Policy',
+    'camera=(), microphone=(), geolocation=(), payment=(self "https://js.paystack.co")'
+  );
+
+  next();
+});
+// ──────────────────────────────────────────────────────────
+// END OF SECURITY PATCH
+// ──────────────────────────────────────────────────────────
+
 const https = require('https');
 
 
@@ -18,8 +80,6 @@ const https = require('https');
 // ===================================================
 const PORT = process.env.PORT || 10000;
 const MONGODB_URI = process.env.MONGODB_URI;
-const JWT_SECRET = process.env.JWT_SECRET || 'fortunehub_jwt_super_secret_2026_change_me';
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 
 // ✅ FIX: Support multiple common env variable names for Paystack keys.
 // Render dashboard may use PAYSTACK_SECRET_KEY, PAYSTACK_ACK_SECRET, or PAYSTACK_SECRET.
@@ -58,7 +118,6 @@ const MAIL_FROM = 'Fortunehub <hello@fortunehub.name.ng>';
 
 // Initialize Resend (safe even if key is missing; sending will fail with a clear message)
 const resend = new Resend(RESEND_API_KEY || '');
-const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 
 function paystackRequest(path, method, bodyObj = null) {
@@ -159,7 +218,7 @@ const corsOptions = {
 
     return cb(new Error(`CORS blocked origin: ${origin}`));
   },
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Paystack-Signature'],
   credentials: true,
   optionsSuccessStatus: 200
@@ -181,38 +240,10 @@ const paymentSchema = new mongoose.Schema({
   paymentDate:     { type: Date, default: Date.now },
   webhookReceived: { type: Boolean, default: false },
   emailSent:       { type: Boolean, default: false },
-  userId:          { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   createdAt:       { type: Date, default: Date.now }
 });
 
 const Payment = mongoose.model('Payment', paymentSchema);
-
-const userSchema = new mongoose.Schema({
-  googleId:     { type: String, sparse: true, default: null },
-  email:        { type: String, required: true, unique: true, lowercase: true, trim: true },
-  name:         { type: String, required: true, trim: true },
-  picture:      { type: String, default: '' },
-  password:     { type: String, default: null },
-  authProvider: { type: String, enum: ['google', 'email'], required: true },
-phone:        { type: String, default: '' },
-
-  // Email verification (for authProvider='email')
-  isEmailVerified:               { type: Boolean, default: false },
-  emailVerificationCodeHash:     { type: String,  default: null },
-  emailVerificationCodeExpires:  { type: Date,    default: null },
-  emailVerificationTokenHash:    { type: String,  default: null },
-  emailVerificationTokenExpires: { type: Date,    default: null },
-
-  // Password reset
-  resetPasswordCodeHash:         { type: String,  default: null },
-  resetPasswordCodeExpires:      { type: Date,    default: null },
-  resetPasswordTokenHash:        { type: String,  default: null },
-  resetPasswordTokenExpires:     { type: Date,    default: null },
-
-  createdAt:    { type: Date, default: Date.now }
-});
-
-const User = mongoose.model('User', userSchema);
 
 // ===================================================
 // 3) WEBHOOK (MUST BE BEFORE express.json())
@@ -250,12 +281,6 @@ app.post(
         const email       = customer?.email;
         const amountNaira = amount / 100;
 
-        let userId = null;
-        if (email) {
-          const foundUser = await User.findOne({ email: email.toLowerCase() }).select('_id');
-          if (foundUser) userId = foundUser._id;
-        }
-
         const updated = await Payment.findOneAndUpdate(
           { reference },
           {
@@ -266,8 +291,7 @@ app.post(
             status: 'success',
             metadata,
             paymentDate:     paid_at ? new Date(paid_at) : new Date(),
-            webhookReceived: true,
-            ...(userId && { userId })
+            webhookReceived: true
           },
           { upsert: true, new: true }
         );
@@ -396,669 +420,6 @@ mongoose.connection.on('error', (err) => {
 
 connectMongo();
 
-function authMiddleware(req, res, next) {
-  const authHeader = req.headers.authorization || '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-
-  if (!token) {
-    return res.status(401).json({ success: false, message: 'Authentication required' });
-  }
-
-  try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
-  } catch (error) {
-    return res.status(401).json({ success: false, message: 'Invalid or expired token' });
-  }
-}
-
-
-
-function make6DigitCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
-
-function sha256(input) {
-  return crypto.createHash('sha256').update(String(input)).digest('hex');
-}
-
-function json_escape(s) {
-  return JSON.stringify(String(s || ''));
-}
-
-function escapeHtml(str) {
-  return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
-
-function getApiBaseUrl(req) {
-  const env = String(process.env.API_BASE_URL || '').trim();
-  if (env) return env.replace(/\/$/, '');
-  try {
-    const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
-    const host  = req.get('host');
-    return `${proto}://${host}`;
-  } catch {
-    return `http://localhost:${PORT}`;
-  }
-}
-
-function getFrontendBaseUrl(req) {
-  const envUrl = String(process.env.FRONTEND_BASE_URL || process.env.FRONTEND_URL || '').trim();
-  if (envUrl) return envUrl.replace(/\/$/, '');
-
-  const origin = String(req?.headers?.origin || '').trim();
-  if (origin && origin !== 'null') return origin.replace(/\/$/, '');
-
-  return 'https://fortunehub.name.ng';
-}
-
-async function sendVerificationEmail({ req, toEmail, name, code, token }) {
-  if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY is missing (cannot send email)');
-  const apiBase = getApiBaseUrl(req);
-  const verifyUrl = `${apiBase}/api/auth/verify-email?token=${encodeURIComponent(token)}`;
-
-  const html = `
-    <div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;line-height:1.5;">
-      <h2 style="color:#1e3a8a;margin:0 0 10px;">Verify your FortuneHub account</h2>
-      <p style="margin:0 0 12px;">Hi ${escapeHtml(name || 'there')},</p>
-      <p style="margin:0 0 12px;">Use this 6-digit verification code:</p>
-      <div style="font-size:28px;font-weight:800;letter-spacing:6px;background:#f0f7ff;border:1px solid #b8d4f8;border-radius:12px;padding:14px 16px;text-align:center;">${code}</div>
-      <p style="margin:14px 0 8px;">Or verify instantly with this link:</p>
-      <p style="margin:0 0 14px;"><a href="${verifyUrl}" style="color:#1e3a8a;font-weight:800;">Verify my email</a></p>
-      <p style="color:#6b7280;font-size:13px;margin:0;">If you didn’t create an account, you can ignore this email.</p>
-    </div>
-  `;
-
-  await resend.emails.send({
-    from: MAIL_FROM,
-    to: [toEmail],
-    subject: 'Verify your FortuneHub email',
-    html
-  });
-}
-
-async function sendPasswordResetEmail({ req, toEmail, code, token }) {
-  if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY is missing (cannot send email)');
-  const apiBase = getApiBaseUrl(req);
-  const resetUrl = `${apiBase}/api/auth/reset-password?token=${encodeURIComponent(token)}`;
-
-  const html = `
-    <div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;line-height:1.5;">
-      <h2 style="color:#1e3a8a;margin:0 0 10px;">Reset your FortuneHub password</h2>
-      <p style="margin:0 0 12px;">Use this 6-digit reset code:</p>
-      <div style="font-size:28px;font-weight:800;letter-spacing:6px;background:#fff8e1;border:1px solid #ffe082;border-radius:12px;padding:14px 16px;text-align:center;">${code}</div>
-      <p style="margin:14px 0 8px;">Or use this reset link:</p>
-      <p style="margin:0 0 14px;"><a href="${resetUrl}" style="color:#1e3a8a;font-weight:800;">Reset password</a></p>
-      <p style="color:#6b7280;font-size:13px;margin:0;">If you didn’t request this, ignore this email.</p>
-    </div>
-  `;
-
-  await resend.emails.send({
-    from: MAIL_FROM,
-    to: [toEmail],
-    subject: 'FortuneHub password reset',
-    html
-  });
-}
-function issueJWT(user) {
-  return jwt.sign(
-    {
-      id: user._id,
-      email: user.email,
-      name: user.name,
-      picture: user.picture || '',
-      authProvider: user.authProvider
-    },
-    JWT_SECRET,
-    { expiresIn: '30d' }
-  );
-}
-
-app.post('/api/auth/google', async (req, res) => {
-  try {
-    const { credential } = req.body || {};
-
-    if (!credential) {
-      return res.status(400).json({ success: false, message: 'Google credential required' });
-    }
-
-    if (!GOOGLE_CLIENT_ID) {
-      return res.status(500).json({ success: false, message: 'GOOGLE_CLIENT_ID not configured on server' });
-    }
-
-    const ticket = await googleClient.verifyIdToken({
-      idToken: credential,
-      audience: GOOGLE_CLIENT_ID
-    });
-
-    const payload = ticket.getPayload() || {};
-    const { sub: googleId, email, name, picture } = payload;
-
-    if (!email) {
-      return res.status(400).json({ success: false, message: 'Google account has no email' });
-    }
-
-    let user = await User.findOne({
-      $or: [{ email: email.toLowerCase() }, { googleId }]
-    });
-
-    if (!user) {
-      user = await User.create({
-        googleId,
-        email: email.toLowerCase(),
-        name: name || email.split('@')[0],
-        picture: picture || '',
-        authProvider: 'google',
-        isEmailVerified: true  // ✅ FIX: Google already verifies the email
-      });
-      console.log(`✅ New Google user registered: ${email}`);
-    } else {
-      // ✅ FIX: Update googleId and mark as verified (Google confirms the email)
-      user.googleId = googleId;
-      user.picture = picture || user.picture;
-      user.name = name || user.name;
-      // If this was an unverified email account, link it to Google and verify it
-      if (!user.isEmailVerified) user.isEmailVerified = true;
-      // If account was email-based, keep authProvider but allow Google login
-      if (user.authProvider === 'email') user.authProvider = 'google';
-      await user.save();
-    }
-
-    const token = issueJWT(user);
-    return res.json({
-      success: true,
-      token,
-      user: {
-        id: user._id,
-        email: user.email,
-        name: user.name,
-        picture: user.picture || '',
-        authProvider: user.authProvider,
-        phone: user.phone || ''
-      }
-    });
-  } catch (error) {
-    console.error('❌ Google auth error:', error?.message || error);
-    return res.status(401).json({
-      success: false,
-      message: 'Google authentication failed: ' + (error?.message || 'Unknown error')
-    });
-  }
-});
-
-
-app.post('/api/auth/signup', async (req, res) => {
-  try {
-    const { name, email, password, confirmPassword } = req.body || {};
-
-    if (!name || !email || !password) {
-      return res.status(400).json({ success: false, message: 'Name, email, and password are required' });
-    }
-
-    if (confirmPassword != null && String(confirmPassword) !== String(password)) {
-      return res.status(400).json({ success: false, message: 'Passwords do not match' });
-    }
-
-    if (String(password).length < 6) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
-    }
-
-    const existing = await User.findOne({ email: String(email).toLowerCase() });
-    if (existing) {
-      // ✅ FIX: Give specific message for Google-registered accounts
-      if (existing.authProvider === 'google') {
-        return res.status(409).json({
-          success: false,
-          isGoogleAccount: true,
-          message: 'This email is registered with Google Sign-In. Please click "Continue with Google" to sign in.'
-        });
-      }
-      return res.status(409).json({
-        success: false,
-        requiresVerification: !existing.isEmailVerified && existing.authProvider === 'email',
-        email: existing.email,
-        message: 'An account with this email already exists. Please sign in.'
-      });
-    }
-
-    const hashed = await bcrypt.hash(String(password), 12);
-
-    const code  = make6DigitCode();
-    const token = crypto.randomBytes(32).toString('hex');
-
-    const user = await User.create({
-      name: String(name).trim(),
-      email: String(email).toLowerCase().trim(),
-      password: hashed,
-      authProvider: 'email',
-      isEmailVerified: false,
-      emailVerificationCodeHash: sha256(code),
-      emailVerificationCodeExpires: new Date(Date.now() + 15 * 60 * 1000),
-      emailVerificationTokenHash: sha256(token),
-      emailVerificationTokenExpires: new Date(Date.now() + 24 * 60 * 60 * 1000)
-    });
-
-    try {
-      await sendVerificationEmail({ req, toEmail: user.email, name: user.name, code, token });
-    } catch (mailErr) {
-      console.error('❌ Verification email failed:', mailErr?.message || mailErr);
-      return res.status(201).json({
-        success: true,
-        requiresVerification: true,
-        email: user.email,
-        message: 'Account created, but we could not send a verification email. Please try again later.'
-      });
-    }
-
-    return res.status(201).json({
-      success: true,
-      requiresVerification: true,
-      email: user.email,
-      message: 'Verification code sent. Please check your email (including Spam).'
-    });
-
-  } catch (error) {
-    console.error('❌ Signup error:', error?.message || error);
-    return res.status(500).json({ success: false, message: 'Signup failed: ' + error.message });
-  }
-});
-
-
-app.post('/api/auth/signin', async (req, res) => {
-  try {
-    const { email, password } = req.body || {};
-
-    // ✅ FIX: Properly closed if-block (was missing closing brace — caused dead routes)
-    if (!email || !password) {
-      return res.status(400).json({ success: false, message: 'Email and password are required' });
-    }
-
-    const user = await User.findOne({ email: String(email).toLowerCase().trim() });
-
-    if (!user) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
-    }
-
-    // ✅ FIX: Detect Google-only accounts and guide user to Google Sign-In
-    if (user.authProvider === 'google' && !user.password) {
-      return res.status(400).json({
-        success: false,
-        isGoogleAccount: true,
-        message: 'This account was registered with Google. Please sign in using the "Continue with Google" button.'
-      });
-    }
-
-    if (!user.password) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
-    }
-
-    if (user.authProvider === 'email' && !user.isEmailVerified) {
-      return res.status(403).json({
-        success: false,
-        requiresVerification: true,
-        email: user.email,
-        message: 'Please verify your email before signing in.'
-      });
-    }
-
-    const valid = await bcrypt.compare(String(password), user.password);
-    if (!valid) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
-    }
-
-    const token = issueJWT(user);
-    return res.json({
-      success: true,
-      token,
-      user: {
-        id: user._id,
-        email: user.email,
-        name: user.name,
-        picture: user.picture || '',
-        authProvider: user.authProvider,
-        phone: user.phone || ''
-      }
-    });
-  } catch (error) {
-    console.error('❌ Signin error:', error?.message || error);
-    return res.status(500).json({ success: false, message: 'Signin failed: ' + error.message });
-  }
-});
-
-// ===================================================
-// AUTH ROUTES — Email Verification & Password Reset
-// ✅ FIX: These routes were accidentally nested inside
-//         /api/auth/signin's if-block (dead code).
-//         They are now properly registered at top level.
-// ===================================================
-
-app.get('/api/auth/verify-email', async (req, res) => {
-  try {
-    const token = String(req.query?.token || '').trim();
-    if (!token) return res.status(400).send('Missing token');
-
-    const user = await User.findOne({
-      emailVerificationTokenHash: sha256(token),
-      emailVerificationTokenExpires: { $gt: new Date() }
-    });
-
-    if (!user) return res.status(400).send('Invalid or expired verification token');
-
-    user.isEmailVerified = true;
-    user.emailVerificationCodeHash = null;
-    user.emailVerificationCodeExpires = null;
-    user.emailVerificationTokenHash = null;
-    user.emailVerificationTokenExpires = null;
-    await user.save();
-
-    const frontend = getFrontendBaseUrl(req);
-    return res.redirect(`${frontend}/?email_verified=1`);
-  } catch (err) {
-    console.error('❌ verify-email error:', err);
-    return res.status(500).send('Verification failed');
-  }
-});
-
-app.post('/api/auth/verify-email-code', async (req, res) => {
-  try {
-    const email = String(req.body?.email || '').toLowerCase().trim();
-    const code  = String(req.body?.code  || '').trim();
-
-    if (!email || !/^\d{6}$/.test(code)) {
-      return res.status(400).json({ success: false, message: 'Email and 6-digit code are required' });
-    }
-
-    const user = await User.findOne({
-      email,
-      authProvider: 'email',
-      isEmailVerified: false,
-      emailVerificationCodeHash: sha256(code),
-      emailVerificationCodeExpires: { $gt: new Date() }
-    });
-
-    if (!user) {
-      return res.status(400).json({ success: false, message: 'Invalid or expired code' });
-    }
-
-    user.isEmailVerified = true;
-    user.emailVerificationCodeHash = null;
-    user.emailVerificationCodeExpires = null;
-    user.emailVerificationTokenHash = null;
-    user.emailVerificationTokenExpires = null;
-    await user.save();
-
-    return res.json({ success: true, message: 'Email verified successfully' });
-  } catch (err) {
-    console.error('❌ verify-email-code error:', err);
-    return res.status(500).json({ success: false, message: 'Verification failed' });
-  }
-});
-
-app.post('/api/auth/resend-verification', async (req, res) => {
-  try {
-    const email = String(req.body?.email || '').toLowerCase().trim();
-    if (!email) return res.status(400).json({ success: false, message: 'Email is required' });
-
-    const user = await User.findOne({ email, authProvider: 'email' });
-
-    // Always respond success to reduce account enumeration
-    if (!user) {
-      return res.json({ success: true, message: 'If the email exists, a new code has been sent.' });
-    }
-
-    if (user.isEmailVerified) {
-      return res.json({ success: true, message: 'Email is already verified. Please sign in.' });
-    }
-
-    const code  = make6DigitCode();
-    const token = crypto.randomBytes(32).toString('hex');
-
-    user.emailVerificationCodeHash = sha256(code);
-    user.emailVerificationCodeExpires = new Date(Date.now() + 15 * 60 * 1000);
-    user.emailVerificationTokenHash = sha256(token);
-    user.emailVerificationTokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    await user.save();
-
-    await sendVerificationEmail({ req, toEmail: user.email, name: user.name, code, token });
-
-    return res.json({ success: true, message: 'Verification email sent.' });
-  } catch (err) {
-    console.error('❌ resend-verification error:', err);
-    return res.status(500).json({ success: false, message: 'Could not resend verification email' });
-  }
-});
-
-app.post('/api/auth/forgot-password', async (req, res) => {
-  try {
-    const email = String(req.body?.email || '').toLowerCase().trim();
-    if (!email) return res.status(400).json({ success: false, message: 'Email is required' });
-
-    const user = await User.findOne({ email, authProvider: 'email' });
-
-    // Always respond success to reduce account enumeration
-    if (!user || !user.password) {
-      return res.json({ success: true, message: 'If that email exists, a reset link/code has been sent.' });
-    }
-
-    const code  = make6DigitCode();
-    const token = crypto.randomBytes(32).toString('hex');
-
-    user.resetPasswordCodeHash = sha256(code);
-    user.resetPasswordCodeExpires = new Date(Date.now() + 15 * 60 * 1000);
-    user.resetPasswordTokenHash = sha256(token);
-    user.resetPasswordTokenExpires = new Date(Date.now() + 60 * 60 * 1000);
-    await user.save();
-
-    await sendPasswordResetEmail({ req, toEmail: user.email, code, token });
-
-    return res.json({ success: true, message: 'If that email exists, a reset link/code has been sent.' });
-  } catch (err) {
-    console.error('❌ forgot-password error:', err);
-    return res.status(500).json({ success: false, message: 'Could not process request' });
-  }
-});
-
-app.get('/api/auth/reset-password', async (req, res) => {
-  const token = String(req.query?.token || '').trim();
-  if (!token) return res.status(400).send('Missing token');
-
-  const apiBase = getApiBaseUrl(req);
-
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  return res.end(`
-<!doctype html>
-<html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Reset Password • FortuneHub</title>
-<style>
-  body{font-family:Arial,sans-serif;background:#0b1020;color:#111;margin:0;padding:24px;}
-  .card{max-width:520px;margin:40px auto;background:#fff;border-radius:16px;padding:22px 20px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
-  h1{font-size:20px;margin:0 0 12px;color:#1e3a8a}
-  label{display:block;font-weight:700;margin:12px 0 6px}
-  input{width:100%;padding:12px 14px;border:1px solid #ddd;border-radius:12px;font-size:16px}
-  button{margin-top:14px;width:100%;padding:12px 14px;border:none;border-radius:12px;background:#1e3a8a;color:#fff;font-weight:800;font-size:16px;cursor:pointer}
-  small{display:block;margin-top:10px;color:#6b7280;line-height:1.45}
-  .msg{margin-top:10px;font-weight:700}
-</style>
-</head>
-<body>
-  <div class="card">
-    <h1>Reset your password</h1>
-    <form id="f">
-      <label>New password</label>
-      <input id="p1" type="password" minlength="6" required placeholder="Min. 6 characters" />
-      <label>Confirm password</label>
-      <input id="p2" type="password" minlength="6" required placeholder="Re-enter password" />
-      <button type="submit">Update password</button>
-      <div class="msg" id="m"></div>
-      <small>After updating, go back to FortuneHub and sign in.</small>
-    </form>
-  </div>
-<script>
-  const token = ${json_escape(token)};
-  const form = document.getElementById('f');
-  const m = document.getElementById('m');
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    m.textContent = '';
-    const p1 = document.getElementById('p1').value;
-    const p2 = document.getElementById('p2').value;
-    if (p1.length < 6) { m.textContent = 'Password must be at least 6 characters'; m.style.color='crimson'; return; }
-    if (p1 !== p2) { m.textContent = 'Passwords do not match'; m.style.color='crimson'; return; }
-    try {
-      const res = await fetch('${apiBase}/api/auth/reset-password', {
-        method:'POST',
-        headers:{'Content-Type':'application/json','Accept':'application/json'},
-        body: JSON.stringify({ token, password: p1 })
-      });
-      const data = await res.json();
-      if (data.success) { m.textContent = 'Password updated successfully.'; m.style.color='#065f46'; }
-      else { m.textContent = data.message || 'Reset failed'; m.style.color='crimson'; }
-    } catch { m.textContent = 'Network error'; m.style.color='crimson'; }
-  });
-</script>
-</body></html>`);
-});
-
-app.post('/api/auth/reset-password', async (req, res) => {
-  try {
-    const token = String(req.body?.token || '').trim();
-    const email = String(req.body?.email || '').toLowerCase().trim();
-    const code  = String(req.body?.code  || '').trim();
-    const password = String(req.body?.password || '');
-
-    if (!password || password.length < 6) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
-    }
-
-    let user = null;
-
-    if (token) {
-      user = await User.findOne({
-        resetPasswordTokenHash: sha256(token),
-        resetPasswordTokenExpires: { $gt: new Date() }
-      });
-    } else if (email && /^\d{6}$/.test(code)) {
-      user = await User.findOne({
-        email,
-        resetPasswordCodeHash: sha256(code),
-        resetPasswordCodeExpires: { $gt: new Date() }
-      });
-    } else {
-      return res.status(400).json({ success: false, message: 'Token or (email + 6-digit code) is required' });
-    }
-
-    if (!user) {
-      return res.status(400).json({ success: false, message: 'Invalid or expired reset token/code' });
-    }
-
-    user.password = await bcrypt.hash(password, 12);
-    user.resetPasswordCodeHash = null;
-    user.resetPasswordCodeExpires = null;
-    user.resetPasswordTokenHash = null;
-    user.resetPasswordTokenExpires = null;
-    if (user.authProvider === 'email') user.isEmailVerified = true;
-    await user.save();
-
-    return res.json({ success: true, message: 'Password updated successfully' });
-  } catch (err) {
-    console.error('❌ reset-password error:', err);
-    return res.status(500).json({ success: false, message: 'Reset failed' });
-  }
-});
-
-
-app.get('/api/auth/me', authMiddleware, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id).select('-password');
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    return res.json({ success: true, user });
-  } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-app.patch('/api/auth/me', authMiddleware, async (req, res) => {
-  try {
-    const { phone } = req.body || {};
-    const user = await User.findByIdAndUpdate(
-      req.user.id,
-      { phone: phone || '' },
-      { new: true }
-    ).select('-password');
-
-    return res.json({ success: true, user });
-  } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// ✅ NEW: Quick session check endpoint — used by frontend to validate JWT on page load
-app.get('/api/auth/check-session', authMiddleware, (req, res) => {
-  return res.json({ success: true, user: req.user });
-});
-
-app.get('/api/transactions/my', authMiddleware, async (req, res) => {
-  try {
-    const page = Math.max(1, parseInt(req.query.page || '1', 10));
-    const limit = Math.min(50, parseInt(req.query.limit || '20', 10));
-
-    const query = {
-      status: 'success',
-      $or: [
-        { userId: req.user.id },
-        { email: req.user.email }
-      ]
-    };
-
-    const total = await Payment.countDocuments(query);
-    const transactions = await Payment.find(query)
-      .sort({ paymentDate: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
-
-    return res.json({
-      success: true,
-      data: transactions,
-      pagination: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit)
-      }
-    });
-  } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-app.get('/api/transactions/receipt/:reference', authMiddleware, async (req, res) => {
-  try {
-    const payment = await Payment.findOne({
-      reference: req.params.reference,
-      $or: [
-        { userId: req.user.id },
-        { email: req.user.email }
-      ]
-    }).lean();
-
-    if (!payment) {
-      return res.status(404).json({ success: false, message: 'Receipt not found' });
-    }
-
-    return res.json({ success: true, data: payment });
-  } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
-  }
-});
-
 // ===================================================
 // 6) ROUTES
 // ===================================================
@@ -1097,9 +458,7 @@ app.get('/health', (req, res) => {
     mongodb:  mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     resend:   RESEND_API_KEY  ? 'configured' : 'missing',
     mailFrom: MAIL_FROM,
-    paystack: PAYSTACK_SECRET_KEY ? 'configured' : 'missing',
-    google:   GOOGLE_CLIENT_ID ? 'configured' : 'missing',
-    auth:     'jwt'
+    paystack: PAYSTACK_SECRET_KEY ? 'configured' : 'missing'
   });
 });
 
@@ -1112,10 +471,7 @@ app.post('/api/payment/verify', async (req, res) => handlePaymentVerification(re
 //      Fixes Paystack popup "We could not start this transaction"
 //      by creating a transaction on the server first.
 // ===================================================
-app.post('/api/payment/initialize', authMiddleware, async (req, res) => {
-  // ✅ FIX: Authentication is now required before checkout.
-  // The authMiddleware above returns 401 if no valid JWT is present,
-  // preventing guest purchases. Frontend must show sign-in modal on 401.
+app.post('/api/payment/initialize', async (req, res) => {
   try {
     if (!PAYSTACK_SECRET_KEY) {
       console.error('❌ PAYSTACK_SECRET_KEY is not set in environment variables!');
@@ -1135,20 +491,6 @@ app.post('/api/payment/initialize', authMiddleware, async (req, res) => {
     const email = String(req.body?.email || '').trim();
     const amountNaira = Number(req.body?.amount);
     const rawMetadata = req.body?.metadata || {};
-
-    let userId = null;
-    const authHeader = req.headers.authorization || '';
-    if (authHeader.startsWith('Bearer ')) {
-      try {
-        const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET);
-        userId = decoded.id || null;
-      } catch (_) {}
-    }
-
-    if (!userId && email) {
-      const foundUser = await User.findOne({ email: email.toLowerCase() }).select('_id');
-      if (foundUser) userId = foundUser._id;
-    }
 
     // ✅ FIX: Strip base64 images from cart_items before sending to Paystack.
     // Paystack rejects metadata larger than ~5KB. Admin-panel products store images
@@ -1217,8 +559,7 @@ app.post('/api/payment/initialize', authMiddleware, async (req, res) => {
             currency: 'NGN',
             status: 'pending',
             metadata,
-            paymentDate: new Date(),
-            ...(userId && { userId })
+            paymentDate: new Date()
           },
           { upsert: true, new: true }
         );
@@ -1351,20 +692,6 @@ async function handlePaymentVerification(req, res) {
 
     console.log('💰 Payment details:', { email: customerEmail, amountNaira, currency });
 
-    let userId = null;
-    const authHeader = req.headers.authorization || '';
-    if (authHeader.startsWith('Bearer ')) {
-      try {
-        const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET);
-        userId = decoded.id || null;
-      } catch (_) {}
-    }
-
-    if (!userId && customerEmail) {
-      const foundUser = await User.findOne({ email: customerEmail.toLowerCase() }).select('_id');
-      if (foundUser) userId = foundUser._id;
-    }
-
     const payment = await Payment.findOneAndUpdate(
       { reference },
       {
@@ -1374,8 +701,7 @@ async function handlePaymentVerification(req, res) {
         currency:    currency || 'NGN',
         status:      'success',
         metadata,
-        paymentDate: paid_at ? new Date(paid_at) : new Date(),
-        ...(userId && { userId })
+        paymentDate: paid_at ? new Date(paid_at) : new Date()
       },
       { upsert: true, new: true }
     );
@@ -1522,15 +848,11 @@ app.get('/api/admin/payments', verifyAdmin, async (req, res) => {
       {
         $group: {
           _id: null,
-          // ✅ FIX: totalAmount counts ALL transactions (including pending/cancelled)
-          // successAmount counts ONLY confirmed successful payments — used as true revenue
-          totalAmount:   { $sum: '$amount' },
-          successAmount: { $sum: { $cond: [{ $eq: ['$status', 'success'] }, '$amount', 0] } },
-          totalCount:    { $sum: 1 },
-          successCount:  { $sum: { $cond: [{ $eq: ['$status', 'success']   }, 1, 0] } },
-          pendingCount:  { $sum: { $cond: [{ $eq: ['$status', 'pending']   }, 1, 0] } },
-          failedCount:   { $sum: { $cond: [{ $eq: ['$status', 'failed']    }, 1, 0] } },
-          cancelledCount:{ $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } }
+          totalAmount: { $sum: '$amount' },
+          totalCount:  { $sum: 1 },
+          successCount: { $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] } },
+          pendingCount: { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
+          failedCount:  { $sum: { $cond: [{ $eq: ['$status', 'failed']  }, 1, 0] } }
         }
       }
     ]);
@@ -1544,7 +866,7 @@ app.get('/api/admin/payments', verifyAdmin, async (req, res) => {
         limit,
         totalPages: Math.ceil(total / limit)
       },
-      stats: stats[0] || { totalAmount: 0, successAmount: 0, successCount: 0, pendingCount: 0, failedCount: 0, cancelledCount: 0 }
+      stats: stats[0] || { totalAmount: 0, successCount: 0, pendingCount: 0 }
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -1599,38 +921,6 @@ app.get('/api/admin/payments/:id', verifyAdmin, async (req, res) => {
   }
 });
 
-
-// ===================================================
-// CANCEL PAYMENT ROUTE
-// Called by frontend when user closes/cancels Paystack popup
-// Updates status from 'pending' → 'cancelled'
-// ===================================================
-app.patch('/api/payment/cancel', async (req, res) => {
-  try {
-    const { reference } = req.body;
-    if (!reference) {
-      return res.status(400).json({ success: false, message: 'Payment reference is required' });
-    }
-
-    // Only update if currently pending — do NOT downgrade a successful payment
-    const payment = await Payment.findOneAndUpdate(
-      { reference, status: 'pending' },
-      { status: 'cancelled' },
-      { new: true }
-    );
-
-    if (!payment) {
-      // Payment may already be success or doesn't exist — return OK silently
-      return res.json({ success: true, message: 'No pending payment found to cancel (may already be successful)' });
-    }
-
-    console.log(`🚫 Payment cancelled by user: ${reference}`);
-    return res.json({ success: true, message: 'Payment marked as cancelled', reference });
-  } catch (error) {
-    console.error('❌ Cancel payment error:', error);
-    return res.status(500).json({ success: false, message: error.message });
-  }
-});
 
 // Admin: Clear all transactions (DELETE endpoint)
 // ⚠️ IMPORTANT: This route MUST be defined BEFORE /api/admin/payments/:id
