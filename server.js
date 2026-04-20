@@ -26,9 +26,11 @@ const ADMIN_DISPLAY_NAME = process.env.ADMIN_DISPLAY_NAME || 'FortuneHub Admin';
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').trim();
 const FRONTEND_BASE_URL = (process.env.FRONTEND_BASE_URL || 'https://fortunehub.name.ng').trim();
 const ADMIN_PANEL_URL = (process.env.ADMIN_PANEL_URL || `${FRONTEND_BASE_URL.replace(/\/$/, '')}/admin/`).trim();
+const OPAY_BANK_NAME = process.env.OPAY_BANK_NAME || 'OPay';
 const OPAY_ACCOUNT_NAME = process.env.OPAY_ACCOUNT_NAME || 'FortuneHub';
-const OPAY_ACCOUNT_PHONE = process.env.OPAY_ACCOUNT_PHONE || '';
-const OPAY_WHATSAPP_NUMBER = process.env.OPAY_WHATSAPP_NUMBER || OPAY_ACCOUNT_PHONE || '';
+const OPAY_ACCOUNT_NUMBER = process.env.OPAY_ACCOUNT_NUMBER || process.env.OPAY_ACCOUNT_PHONE || '';
+const OPAY_ACCOUNT_PHONE = OPAY_ACCOUNT_NUMBER;
+const OPAY_WHATSAPP_NUMBER = process.env.OPAY_WHATSAPP_NUMBER || OPAY_ACCOUNT_NUMBER || '';
 const MAIL_FROM = process.env.MAIL_FROM || 'Fortunehub <hello@fortunehub.name.ng>';
 
 const resend = new Resend(RESEND_API_KEY);
@@ -304,6 +306,21 @@ function buildPublicFileUrl(relativePath, req) {
   return `${getPublicBaseUrl(req)}${relativePath.startsWith('/') ? relativePath : `/${relativePath}`}`;
 }
 
+function buildFrontendAssetUrl(assetPath = '') {
+  const base = FRONTEND_BASE_URL.replace(/\/$/, '');
+  if (!assetPath) return base;
+  return `${base}/${String(assetPath).replace(/^\//, '')}`;
+}
+
+function resolveDisplayImage(url, req) {
+  const value = String(url || '').trim();
+  if (!value) return buildFrontendAssetUrl('/favicon.png');
+  if (/^(https?:|data:)/i.test(value)) return value;
+  if (value.startsWith('/uploads/')) return buildPublicFileUrl(value, req);
+  if (value.startsWith('/')) return buildFrontendAssetUrl(value);
+  return buildFrontendAssetUrl(value);
+}
+
 function mapProduct(product) {
   return {
     id: `db_${product._id}`,
@@ -385,6 +402,7 @@ async function generateUniqueOrderRef() {
 }
 
 function emailShell({ title, eyebrow, body, accent = '#667eea' }) {
+  const logoUrl = buildFrontendAssetUrl('/favicon.png');
   return `<!DOCTYPE html>
   <html lang="en">
   <head>
@@ -396,19 +414,34 @@ function emailShell({ title, eyebrow, body, accent = '#667eea' }) {
     <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f6fb;padding:24px 12px;">
       <tr>
         <td align="center">
-          <table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:640px;background:#ffffff;border-radius:18px;overflow:hidden;box-shadow:0 12px 40px rgba(17,24,39,.12);">
+          <table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:680px;background:#ffffff;border-radius:22px;overflow:hidden;box-shadow:0 16px 42px rgba(17,24,39,.12);">
             <tr>
-              <td style="padding:28px 28px 18px;background:linear-gradient(135deg, ${accent} 0%, #764ba2 100%);color:#fff;">
-                <div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;opacity:.92;font-weight:700;">${eyebrow}</div>
-                <h1 style="margin:10px 0 0;font-size:28px;line-height:1.2;">${title}</h1>
+              <td style="padding:24px 28px 18px;background:linear-gradient(135deg, ${accent} 0%, #764ba2 100%);color:#fff;">
+                <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                  <tr>
+                    <td style="vertical-align:middle;">
+                      <table cellpadding="0" cellspacing="0" border="0">
+                        <tr>
+                          <td style="width:60px;height:60px;border-radius:18px;background:rgba(255,255,255,.14);padding:8px;text-align:center;vertical-align:middle;">
+                            <img src="${logoUrl}" alt="FortuneHub logo" width="44" height="44" style="display:block;width:44px;height:44px;object-fit:contain;margin:0 auto;" />
+                          </td>
+                          <td style="padding-left:14px;vertical-align:middle;">
+                            <div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;opacity:.92;font-weight:700;">${eyebrow}</div>
+                            <h1 style="margin:10px 0 0;font-size:28px;line-height:1.2;">${title}</h1>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                </table>
               </td>
             </tr>
             <tr>
               <td style="padding:28px;">${body}</td>
             </tr>
             <tr>
-              <td style="padding:18px 28px;background:#f8f9ff;border-top:1px solid #e5e7eb;color:#6b7280;font-size:12px;line-height:1.6;">
-                FortuneHub manual Opay transfer system<br/>
+              <td style="padding:18px 28px;background:#f8f9ff;border-top:1px solid #e5e7eb;color:#6b7280;font-size:12px;line-height:1.7;">
+                FortuneHub order and bank transfer notification service<br/>
                 ${OWNER_EMAIL ? `Need help? Reply to this email or contact <a href="mailto:${OWNER_EMAIL}" style="color:${accent};text-decoration:none;">${OWNER_EMAIL}</a>.` : 'Need help? Reply to this email.'}
               </td>
             </tr>
@@ -441,40 +474,63 @@ function timelineHtml(order) {
   </div>`;
 }
 
+function itemRowsHtml(order, req) {
+  return (order.items || []).map((item) => {
+    const imageUrl = resolveDisplayImage(item.image || '', req);
+    return `<tr>
+      <td style="padding:12px 0;border-bottom:1px solid #eef2f7;vertical-align:top;">
+        <table cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <td style="padding-right:12px;vertical-align:top;"><img src="${imageUrl}" alt="${item.name}" width="54" height="54" style="display:block;width:54px;height:54px;border-radius:14px;object-fit:cover;border:1px solid #e5e7eb;background:#fff;" /></td>
+            <td style="vertical-align:top;"><div style="font-weight:700;color:#111827;line-height:1.45;">${item.name}</div></td>
+          </tr>
+        </table>
+      </td>
+      <td style="padding:12px 0;border-bottom:1px solid #eef2f7;text-align:center;vertical-align:top;">${item.quantity}</td>
+      <td style="padding:12px 0;border-bottom:1px solid #eef2f7;text-align:right;vertical-align:top;">${formatNaira(Number(item.price) * Number(item.quantity || 1))}</td>
+    </tr>`;
+  }).join('');
+}
+
+function buildOrderSummaryCard(order, tone = 'amber') {
+  const palette = tone === 'green'
+    ? { bg: '#ecfdf5', border: '#a7f3d0' }
+    : { bg: '#fffaf0', border: '#fde68a' };
+  return `<div style="background:${palette.bg};border:1px solid ${palette.border};border-radius:16px;padding:18px;margin-bottom:18px;">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:14px;">
+      <div><strong>Customer:</strong> ${order.customerName}</div>
+      <div><strong>Email:</strong> ${order.email}</div>
+      <div><strong>Phone:</strong> ${order.customerPhone}</div>
+      <div><strong>Total:</strong> ${formatNaira(order.amount)}</div>
+      <div><strong>Shipping:</strong> ${order.shippingState || 'N/A'}</div>
+      <div><strong>Txn ID:</strong> ${order.transactionId || 'Not provided'}</div>
+    </div>
+  </div>`;
+}
+
+function buildItemsTable(order, req) {
+  return `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:18px;font-size:14px;">
+    <thead>
+      <tr>
+        <th style="text-align:left;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Item</th>
+        <th style="text-align:center;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Qty</th>
+        <th style="text-align:right;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Amount</th>
+      </tr>
+    </thead>
+    <tbody>${itemRowsHtml(order, req)}</tbody>
+  </table>`;
+}
+
 function buildAdminProofEmail(order, req) {
   const proofLink = order.proofUrl ? buildPublicFileUrl(order.proofUrl, req) : '#';
-  const itemsRows = order.items.map((item) => `<tr>
-      <td style="padding:10px 0;border-bottom:1px solid #eef2f7;">${item.name}</td>
-      <td style="padding:10px 0;border-bottom:1px solid #eef2f7;text-align:center;">${item.quantity}</td>
-      <td style="padding:10px 0;border-bottom:1px solid #eef2f7;text-align:right;">${formatNaira(Number(item.price) * Number(item.quantity || 1))}</td>
-    </tr>`).join('');
-
   return emailShell({
     title: 'Payment proof uploaded',
     eyebrow: 'Admin notification',
     accent: '#f59e0b',
     body: `
       <p style="margin:0 0 16px;font-size:15px;line-height:1.7;">A customer has uploaded payment proof for order <strong>${order.orderRef}</strong> and the order is now awaiting verification.</p>
-      <div style="background:#fffaf0;border:1px solid #fde68a;border-radius:14px;padding:18px;margin-bottom:18px;">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:14px;">
-          <div><strong>Customer:</strong> ${order.customerName}</div>
-          <div><strong>Email:</strong> ${order.email}</div>
-          <div><strong>Phone:</strong> ${order.customerPhone}</div>
-          <div><strong>Total:</strong> ${formatNaira(order.amount)}</div>
-          <div><strong>Shipping:</strong> ${order.shippingState || 'N/A'}</div>
-          <div><strong>Txn ID:</strong> ${order.transactionId || 'Not provided'}</div>
-        </div>
-      </div>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:18px;font-size:14px;">
-        <thead>
-          <tr>
-            <th style="text-align:left;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Item</th>
-            <th style="text-align:center;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Qty</th>
-            <th style="text-align:right;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Amount</th>
-          </tr>
-        </thead>
-        <tbody>${itemsRows}</tbody>
-      </table>
+      ${buildOrderSummaryCard(order, 'amber')}
+      ${buildItemsTable(order, req)}
       <div style="display:flex;flex-wrap:wrap;gap:12px;">
         <a href="${proofLink}" style="display:inline-block;background:#111827;color:#fff;text-decoration:none;padding:12px 18px;border-radius:10px;font-weight:700;">View uploaded proof</a>
         <a href="${ADMIN_PANEL_URL}" style="display:inline-block;background:#f59e0b;color:#111827;text-decoration:none;padding:12px 18px;border-radius:10px;font-weight:700;">Open admin dashboard</a>
@@ -484,41 +540,34 @@ function buildAdminProofEmail(order, req) {
   });
 }
 
+function buildBuyerProofReceivedEmail(order, req) {
+  return emailShell({
+    title: 'We received your payment proof',
+    eyebrow: 'Customer update',
+    accent: '#4361ee',
+    body: `
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;">Hi <strong>${order.customerName}</strong>, we have received the payment proof for order <strong>${order.orderRef}</strong>. Our team will verify it shortly and notify you once payment is confirmed.</p>
+      ${buildOrderSummaryCard(order, 'amber')}
+      ${buildItemsTable(order, req)}
+      <div style="padding:16px 18px;border-radius:16px;background:#eef2ff;border:1px solid #c7d2fe;color:#312e81;font-size:14px;line-height:1.7;margin-bottom:18px;">
+        Please keep your transaction details available in case our team needs to confirm the transfer narration or bank reference.
+      </div>
+      ${timelineHtml(order)}
+    `
+  });
+}
+
 function buildBuyerReceiptEmail(order, req) {
   const receiptLink = order.receiptPdfUrl ? buildPublicFileUrl(order.receiptPdfUrl, req) : '#';
-  const itemsRows = order.items.map((item) => `<tr>
-      <td style="padding:10px 0;border-bottom:1px solid #eef2f7;">${item.name}</td>
-      <td style="padding:10px 0;border-bottom:1px solid #eef2f7;text-align:center;">${item.quantity}</td>
-      <td style="padding:10px 0;border-bottom:1px solid #eef2f7;text-align:right;">${formatNaira(Number(item.price) * Number(item.quantity || 1))}</td>
-    </tr>`).join('');
-
   return emailShell({
     title: 'Your payment has been verified',
     eyebrow: 'Receipt enclosed',
     accent: '#10b981',
     body: `
-      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;">Hi <strong>${order.customerName}</strong>, your Opay transfer for order <strong>${order.orderRef}</strong> has been verified successfully. Your receipt PDF is attached to this email.</p>
-      <div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:14px;padding:18px;margin-bottom:18px;">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:14px;">
-          <div><strong>Status:</strong> Paid</div>
-          <div><strong>Verified:</strong> ${order.verifiedAt ? formatDateWAT(order.verifiedAt) : '—'}</div>
-          <div><strong>Total:</strong> ${formatNaira(order.amount)}</div>
-          <div><strong>Order ref:</strong> ${order.orderRef}</div>
-          <div><strong>Shipping:</strong> ${order.shippingState || 'N/A'}</div>
-          <div><strong>Transaction ID:</strong> ${order.transactionId || 'Not provided'}</div>
-        </div>
-      </div>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:18px;font-size:14px;">
-        <thead>
-          <tr>
-            <th style="text-align:left;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Item</th>
-            <th style="text-align:center;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Qty</th>
-            <th style="text-align:right;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Amount</th>
-          </tr>
-        </thead>
-        <tbody>${itemsRows}</tbody>
-      </table>
-      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;background:#f8f9ff;border:1px solid #e5e7eb;border-radius:14px;padding:16px;margin-bottom:18px;">
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;">Hi <strong>${order.customerName}</strong>, your bank transfer for order <strong>${order.orderRef}</strong> has been verified successfully. Your receipt PDF is attached to this email.</p>
+      ${buildOrderSummaryCard(order, 'green')}
+      ${buildItemsTable(order, req)}
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;background:#f8f9ff;border:1px solid #e5e7eb;border-radius:16px;padding:16px;margin-bottom:18px;">
         <div><div style="font-size:12px;color:#6b7280;text-transform:uppercase;">Subtotal</div><div style="font-size:18px;font-weight:800;">${formatNaira(order.subtotal)}</div></div>
         <div><div style="font-size:12px;color:#6b7280;text-transform:uppercase;">Shipping</div><div style="font-size:18px;font-weight:800;">${formatNaira(order.shippingFee)}</div></div>
         <div><div style="font-size:12px;color:#6b7280;text-transform:uppercase;">Total paid</div><div style="font-size:18px;font-weight:800;color:#10b981;">${formatNaira(order.amount)}</div></div>
@@ -530,6 +579,7 @@ function buildBuyerReceiptEmail(order, req) {
 }
 
 async function sendEmail({ to, subject, html, attachments = [] }) {
+
   if (!RESEND_API_KEY || !to) return;
   try {
     await resend.emails.send({ from: MAIL_FROM, to, subject, html, attachments });
@@ -562,7 +612,7 @@ async function generateReceiptPdf(order, req) {
     doc.text(`Email: ${order.email}`);
     doc.text(`Phone: ${order.customerPhone}`);
     doc.text(`Shipping State: ${order.shippingState || 'N/A'}`);
-    doc.text(`Payment Method: Opay manual transfer`);
+    doc.text(`Payment Method: Bank transfer (${OPAY_BANK_NAME})`);
     doc.text(`Transaction ID: ${order.transactionId || 'Not provided'}`);
     doc.moveDown(1.2);
 
@@ -634,15 +684,19 @@ app.get('/api/config/payment', (req, res) => {
   res.json({
     success: true,
     data: {
-      paymentMethod: 'opay_manual',
+      paymentMethod: 'bank_transfer',
+      paymentMethodLabel: 'Bank transfer',
+      bankName: OPAY_BANK_NAME,
+      accountName: OPAY_ACCOUNT_NAME,
+      accountNumber: OPAY_ACCOUNT_NUMBER,
       opayAccountName: OPAY_ACCOUNT_NAME,
-      opayAccountPhone: OPAY_ACCOUNT_PHONE,
+      opayAccountPhone: OPAY_ACCOUNT_NUMBER,
       whatsappHelpNumber: OPAY_WHATSAPP_NUMBER,
       whatsappHelpLink: OPAY_WHATSAPP_NUMBER
         ? `https://wa.me/${String(OPAY_WHATSAPP_NUMBER).replace(/\D/g, '')}`
         : '',
       instructions: [
-        'Transfer the exact order amount to the Opay account/phone shown below.',
+        'Transfer the exact order amount to the bank account shown below.',
         'Use your order reference as payment narration if possible.',
         'After payment, upload your transfer proof for manual verification.'
       ]
@@ -865,6 +919,12 @@ app.post('/api/orders/:id/proof', authMiddleware, (req, res, next) => {
         html: buildAdminProofEmail(order, req)
       });
     }
+
+    await sendEmail({
+      to: order.email,
+      subject: `We received your payment proof for ${order.orderRef}`,
+      html: buildBuyerProofReceivedEmail(order, req)
+    });
 
     return res.json({ success: true, message: 'Payment proof uploaded. Awaiting verification.', data: serializeOrder(order, req) });
   } catch (error) {
