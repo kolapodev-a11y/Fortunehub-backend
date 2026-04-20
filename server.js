@@ -1,120 +1,46 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
+const PDFDocument = require('pdfkit');
 const { OAuth2Client } = require('google-auth-library');
 const { Resend } = require('resend');
 require('dotenv').config();
 
 const app = express();
-const https = require('https');
 
-
-
-// ===================================================
-// 0) ENV + BASIC VALIDATION
-// ===================================================
 const PORT = process.env.PORT || 10000;
 const MONGODB_URI = process.env.MONGODB_URI;
 const JWT_SECRET = process.env.JWT_SECRET || 'fortunehub_jwt_super_secret_2026_change_me';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
-
-// ✅ FIX: Support multiple common env variable names for Paystack keys.
-// Render dashboard may use PAYSTACK_SECRET_KEY, PAYSTACK_ACK_SECRET, or PAYSTACK_SECRET.
-// The PUBLIC key must also be set so the backend can return it to the frontend,
-// ensuring the frontend always uses the SAME account's public key.
-const PAYSTACK_SECRET_KEY =
-  process.env.PAYSTACK_SECRET_KEY ||
-  process.env.PAYSTACK_ACK_SECRET ||
-  process.env.PAYSTACK_SECRET ||
-  '';
-
-// ✅ FIX: Backend returns PAYSTACK_PUBLIC_KEY to frontend in /api/payment/initialize
-// so the frontend popup always uses the matching public key for the same account.
-// ✅ PAYSTACK_PUBLIC_KEY: Must match the same account as PAYSTACK_SECRET_KEY
-// ⚠️  If not set, the frontend will fall back to its hardcoded key — which may NOT match
-//     the secret key account, causing "We could not start this transaction" error.
-// Set PAYSTACK_PUBLIC_KEY in your Render environment variables!
-const PAYSTACK_PUBLIC_KEY =
-  process.env.PAYSTACK_PUBLIC_KEY ||
-  process.env.PAYSTACK_ACK_PUB ||
-  process.env.PAYSTACK_PUB ||
-  '';
-
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const OWNER_EMAIL = process.env.OWNER_EMAIL;
-
-// Admin credentials (you should change these in production)
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const OWNER_EMAIL = process.env.OWNER_EMAIL || '';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'fortunehub2026';
+const ADMIN_DISPLAY_NAME = process.env.ADMIN_DISPLAY_NAME || 'FortuneHub Admin';
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').trim();
+const FRONTEND_BASE_URL = (process.env.FRONTEND_BASE_URL || 'https://fortunehub.name.ng').trim();
+const ADMIN_PANEL_URL = (process.env.ADMIN_PANEL_URL || `${FRONTEND_BASE_URL.replace(/\/$/, '')}/admin/`).trim();
+const OPAY_ACCOUNT_NAME = process.env.OPAY_ACCOUNT_NAME || 'FortuneHub';
+const OPAY_ACCOUNT_PHONE = process.env.OPAY_ACCOUNT_PHONE || '';
+const OPAY_WHATSAPP_NUMBER = process.env.OPAY_WHATSAPP_NUMBER || OPAY_ACCOUNT_PHONE || '';
+const MAIL_FROM = process.env.MAIL_FROM || 'Fortunehub <hello@fortunehub.name.ng>';
 
-// ---------------------------------------------------
-// ⚠️  SPAM / DOMAIN WARNING:
-// ---------------------------------------------------
-const MAIL_FROM = 'Fortunehub <hello@fortunehub.name.ng>';
-
-
-// Initialize Resend (safe even if key is missing; sending will fail with a clear message)
-const resend = new Resend(RESEND_API_KEY || '');
+const resend = new Resend(RESEND_API_KEY);
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
-
-function paystackRequest(path, method, bodyObj = null) {
-  return new Promise((resolve, reject) => {
-    if (!PAYSTACK_SECRET_KEY) {
-      return reject(new Error('PAYSTACK_SECRET_KEY is missing'));
-    }
-
-    const body = bodyObj ? JSON.stringify(bodyObj) : null;
-
-    const req = https.request(
-      {
-        hostname: 'api.paystack.co',
-        path,
-        method,
-        headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-          'Content-Type': 'application/json',
-          ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {})
-        }
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => {
-          let parsed;
-          try {
-            parsed = data ? JSON.parse(data) : {};
-          } catch (e) {
-            parsed = { raw: data };
-          }
-          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, data: parsed });
-        });
-      }
-    );
-
-    req.on('error', reject);
-    if (body) req.write(body);
-    req.end();
-  });
+const uploadsDir = path.join(__dirname, 'uploads');
+const proofsDir = path.join(uploadsDir, 'proofs');
+const receiptsDir = path.join(uploadsDir, 'receipts');
+for (const dir of [uploadsDir, proofsDir, receiptsDir]) {
+  fs.mkdirSync(dir, { recursive: true });
 }
 
-
-// ===================================================
-// 1) CORS
-// ===================================================
-// ✅ FIX (ADMIN PANEL PRODUCT SAVE FAILS): allow admin.html to work even when opened
-// from a different origin (e.g. file:// on mobile gives Origin: null) and when you
-// deploy to new domains.
-//
-// - Add extra allowed origins using env var: ALLOWED_ORIGINS
-//   Example (Render):
-//   ALLOWED_ORIGINS=https://your-admin-domain.com,https://another-domain.com
-//
-// Security note: We still echo back the request Origin (not '*') because
-// credentials=true cannot be used with wildcard.
 const DEFAULT_ALLOWED_ORIGINS = [
   'https://kolapodev-a11y.github.io',
   'https://fortunehub.name.ng',
@@ -133,195 +59,43 @@ const EXTRA_ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
 
 const ALLOWED_ORIGINS = Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...EXTRA_ALLOWED_ORIGINS]));
 
-const corsOptions = {
-  origin: (origin, cb) => {
-    // Requests from tools like curl/postman may have no origin
-    if (!origin) return cb(null, true);
-
-    // When admin.html is opened as a local file on some phones/browsers
-    if (origin === 'null') return cb(null, true);
-
-    // Exact whitelist
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin || origin === 'null') return cb(null, true);
     if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-
-    // Allow common subdomains safely (optional convenience)
     try {
-      const o = new URL(origin);
-      const host = o.hostname.toLowerCase();
+      const url = new URL(origin);
       if (
-        host.endsWith('.fortunehub.name.ng') ||
-        host.endsWith('.vercel.app') ||
-        host.endsWith('.github.io')
+        url.hostname.endsWith('.fortunehub.name.ng') ||
+        url.hostname.endsWith('.vercel.app') ||
+        url.hostname.endsWith('.github.io')
       ) {
         return cb(null, true);
       }
     } catch (_) {}
-
     return cb(new Error(`CORS blocked origin: ${origin}`));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Paystack-Signature'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
   optionsSuccessStatus: 200
-};
+}));
 
-app.use(cors(corsOptions));
 app.set('trust proxy', 1);
-
-// ===================================================
-// 2) PAYMENTS MODEL
-// ===================================================
-const paymentSchema = new mongoose.Schema({
-  reference:       { type: String, required: true, unique: true },
-  email:           { type: String, required: true },
-  amount:          { type: Number, required: true }, // stored in NAIRA (not kobo)
-  status:          { type: String, default: 'pending' },
-  currency:        { type: String, default: 'NGN' },
-  metadata:        { type: Object },
-  paymentDate:     { type: Date, default: Date.now },
-  webhookReceived: { type: Boolean, default: false },
-  emailSent:       { type: Boolean, default: false },
-  userId:          { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-  createdAt:       { type: Date, default: Date.now }
-});
-
-const Payment = mongoose.model('Payment', paymentSchema);
-
-const userSchema = new mongoose.Schema({
-  googleId:     { type: String, sparse: true, default: null },
-  email:        { type: String, required: true, unique: true, lowercase: true, trim: true },
-  name:         { type: String, required: true, trim: true },
-  picture:      { type: String, default: '' },
-  password:     { type: String, default: null },
-  authProvider: { type: String, enum: ['google', 'email'], required: true },
-  phone:        { type: String, default: '' },
-  createdAt:    { type: Date, default: Date.now }
-});
-
-const User = mongoose.model('User', userSchema);
-
-// ===================================================
-// 3) WEBHOOK (MUST BE BEFORE express.json())
-//    Paystack signature verification requires the RAW body bytes.
-//    If express.json() runs first, signature verification will fail.
-// ===================================================
-app.post(
-  '/api/payment/webhook/paystack',
-  express.raw({ type: 'application/json' }),
-  async (req, res) => {
-    try {
-      if (!PAYSTACK_SECRET_KEY) {
-        console.error('❌ PAYSTACK_SECRET_KEY is missing (webhook cannot be verified)');
-        return res.status(500).send('Server misconfigured');
-      }
-
-      const signature = req.headers['x-paystack-signature'];
-      const rawBody   = req.body; // Buffer
-
-      const computedHash = crypto
-        .createHmac('sha512', PAYSTACK_SECRET_KEY)
-        .update(rawBody)
-        .digest('hex');
-
-      if (!signature || computedHash !== signature) {
-        console.log('❌ Invalid Paystack webhook signature');
-        return res.status(401).send('Invalid signature');
-      }
-
-      const event = JSON.parse(rawBody.toString('utf8'));
-      console.log('📨 Paystack webhook received:', event.event);
-
-      if (event.event === 'charge.success') {
-        const { reference, customer, amount, currency, paid_at, metadata } = event.data;
-        const email       = customer?.email;
-        const amountNaira = amount / 100;
-
-        let userId = null;
-        if (email) {
-          const foundUser = await User.findOne({ email: email.toLowerCase() }).select('_id');
-          if (foundUser) userId = foundUser._id;
-        }
-
-        const updated = await Payment.findOneAndUpdate(
-          { reference },
-          {
-            reference,
-            email,
-            amount: amountNaira,
-            currency: currency || 'NGN',
-            status: 'success',
-            metadata,
-            paymentDate:     paid_at ? new Date(paid_at) : new Date(),
-            webhookReceived: true,
-            ...(userId && { userId })
-          },
-          { upsert: true, new: true }
-        );
-
-        console.log(`✅ Webhook: Payment ${reference} confirmed (saved: ${updated._id})`);
-
-        if (!updated.emailSent) {
-          try {
-            await sendPaymentEmails({
-              toEmail:     email,
-              reference,
-              amountNaira,
-              currency:    currency || 'NGN',
-              paidAt:      paid_at ? new Date(paid_at) : new Date(),
-              metadata:    metadata || {}
-            });
-
-            await Payment.findOneAndUpdate({ reference }, { emailSent: true });
-            console.log('✅ Webhook emails sent successfully');
-          } catch (e) {
-            console.error('❌ Webhook email failed:', e?.message || e);
-            // do not fail webhook
-          }
-        }
-      }
-
-      return res.status(200).send('Webhook received');
-    } catch (error) {
-      console.error('❌ Webhook error:', error);
-      return res.status(500).send('Webhook processing failed');
-    }
-  }
-);
-
-// ===================================================
-// 4) BODY PARSERS (AFTER WEBHOOK)
-// ===================================================
-// ✅ FIX (ADMIN PRODUCT UPLOADS): Increase request body size limit.
-// Admin can upload base64 images (data URLs). Default Express limit is ~100kb,
-// which causes product creation/update to fail (often seen as 413 or "Unexpected token <").
-// 15mb is usually enough for a few compressed images.
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+app.use('/uploads', express.static(uploadsDir));
 
-// ✅ Return JSON for body parser errors (so admin.html can show a clean toast)
 app.use((err, req, res, next) => {
-  // Body too large
   if (err && (err.type === 'entity.too.large' || err.status === 413)) {
-    return res.status(413).json({
-      success: false,
-      message: 'Request payload too large. Please upload smaller/compressed images (or use image URLs).'
-    });
+    return res.status(413).json({ success: false, message: 'Request payload too large.' });
   }
-
-  // Invalid JSON
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
-    return res.status(400).json({
-      success: false,
-      message: 'Invalid JSON payload.'
-    });
+    return res.status(400).json({ success: false, message: 'Invalid JSON payload.' });
   }
-
   return next(err);
 });
 
-// ===================================================
-// 5) MONGODB CONNECTION (WITH RETRY)
-// ===================================================
 let connecting = false;
 async function connectMongo() {
   if (connecting) return;
@@ -334,34 +108,24 @@ async function connectMongo() {
   try {
     await mongoose.connect(MONGODB_URI, {
       serverSelectionTimeoutMS: 10000,
-      connectTimeoutMS:         10000,
-      socketTimeoutMS:          45000,
-      maxPoolSize:              10
+      connectTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+      maxPoolSize: 10
     });
+    console.log('✅ MongoDB connected');
 
-    console.log('🔗 Mongoose connected to MongoDB');
-    console.log('✅ MongoDB Connected Successfully');
-    console.log('📊 Database:', mongoose.connection.name);
-
-    // ✅ FIX: Drop stale 'id_1' unique index on products collection (caused E11000 duplicate key error)
-    // This index existed from an old products.json schema where 'id' was a field with unique constraint.
-    // The new Product schema does NOT have an 'id' field, so MongoDB stores id=null for all docs, triggering E11000.
     try {
       const productsCollection = mongoose.connection.db.collection('products');
       const indexes = await productsCollection.indexes();
-      const hasOldIdIndex = indexes.some(idx => idx.name === 'id_1');
-      if (hasOldIdIndex) {
+      if (indexes.some((idx) => idx.name === 'id_1')) {
         await productsCollection.dropIndex('id_1');
-        console.log('🧹 Dropped stale id_1 index from products collection');
+        console.log('🧹 Dropped stale products.id_1 index');
       }
-    } catch (idxErr) {
-      // Non-fatal: index may not exist or already dropped
-      console.log('ℹ️  id_1 index cleanup (non-fatal):', idxErr.message);
+    } catch (error) {
+      console.log('ℹ️ Products index cleanup skipped:', error.message);
     }
-
-  } catch (err) {
-    console.error('❌ MongoDB Connection Error:', err.message);
-    console.log('⏳ Retrying MongoDB connection in 5s...');
+  } catch (error) {
+    console.error('❌ MongoDB connection error:', error.message);
     setTimeout(() => {
       connecting = false;
       connectMongo();
@@ -372,74 +136,532 @@ async function connectMongo() {
 }
 
 mongoose.connection.on('disconnected', () => {
-  console.log('⚠️ MongoDB disconnected. Attempting to reconnect...');
+  console.log('⚠️ MongoDB disconnected. Retrying...');
   connectMongo();
 });
 
-mongoose.connection.on('error', (err) => {
-  console.log('⚠️ MongoDB runtime error:', err?.message || err);
+mongoose.connection.on('error', (error) => {
+  console.log('⚠️ Mongo runtime error:', error.message);
 });
 
 connectMongo();
 
+const userSchema = new mongoose.Schema({
+  googleId: { type: String, sparse: true, default: null },
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  name: { type: String, required: true, trim: true },
+  picture: { type: String, default: '' },
+  password: { type: String, default: null },
+  authProvider: { type: String, enum: ['google', 'email'], required: true },
+  phone: { type: String, default: '' },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const productSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  price: { type: Number, required: true },
+  category: { type: String, required: true },
+  description: { type: String, default: '' },
+  image: { type: String, default: '' },
+  images: [{ type: String }],
+  tag: { type: String, default: 'none' },
+  outOfStock: { type: Boolean, default: false },
+  sold: { type: Boolean, default: false },
+  statusIndicator: { type: String, default: 'available' },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const orderItemSchema = new mongoose.Schema({
+  productId: { type: String, default: '' },
+  name: { type: String, required: true },
+  price: { type: Number, required: true },
+  quantity: { type: Number, required: true, default: 1 },
+  image: { type: String, default: '' }
+}, { _id: false });
+
+const orderTimelineSchema = new mongoose.Schema({
+  status: { type: String, required: true },
+  label: { type: String, required: true },
+  note: { type: String, default: '' },
+  by: { type: String, default: '' },
+  at: { type: Date, default: Date.now }
+}, { _id: false });
+
+const orderSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  email: { type: String, required: true, lowercase: true, trim: true },
+  customerName: { type: String, required: true, trim: true },
+  customerPhone: { type: String, required: true, trim: true },
+  shippingState: { type: String, default: '' },
+  shippingFee: { type: Number, default: 0 },
+  subtotal: { type: Number, required: true },
+  amount: { type: Number, required: true },
+  items: { type: [orderItemSchema], default: [] },
+  paymentMethod: { type: String, enum: ['opay_manual'], default: 'opay_manual' },
+  status: {
+    type: String,
+    enum: ['pending_payment', 'awaiting_verification', 'paid', 'failed', 'cancelled'],
+    default: 'pending_payment'
+  },
+  orderRef: { type: String, required: true, unique: true },
+  proofUrl: { type: String, default: '' },
+  proofFileName: { type: String, default: '' },
+  transactionId: { type: String, default: '' },
+  verifiedAt: { type: Date, default: null },
+  verifiedBy: { type: String, default: '' },
+  receiptPdfUrl: { type: String, default: '' },
+  statusTimeline: { type: [orderTimelineSchema], default: [] },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+orderSchema.pre('save', function saveUpdatedAt(next) {
+  this.updatedAt = new Date();
+  next();
+});
+
+const User = mongoose.model('User', userSchema);
+const Product = mongoose.model('Product', productSchema);
+const Order = mongoose.model('Order', orderSchema);
+
+function issueJWT(user) {
+  return jwt.sign({
+    id: user._id,
+    email: user.email,
+    name: user.name,
+    picture: user.picture || '',
+    authProvider: user.authProvider
+  }, JWT_SECRET, { expiresIn: '30d' });
+}
+
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-
-  if (!token) {
-    return res.status(401).json({ success: false, message: 'Authentication required' });
-  }
-
+  if (!token) return res.status(401).json({ success: false, message: 'Authentication required' });
   try {
     req.user = jwt.verify(token, JWT_SECRET);
-    next();
-  } catch (error) {
+    return next();
+  } catch (_) {
     return res.status(401).json({ success: false, message: 'Invalid or expired token' });
   }
 }
 
-function issueJWT(user) {
-  return jwt.sign(
-    {
-      id: user._id,
-      email: user.email,
-      name: user.name,
-      picture: user.picture || '',
-      authProvider: user.authProvider
-    },
-    JWT_SECRET,
-    { expiresIn: '30d' }
-  );
+function issueAdminJWT() {
+  return jwt.sign({
+    role: 'admin',
+    username: ADMIN_USERNAME,
+    name: ADMIN_DISPLAY_NAME
+  }, JWT_SECRET, { expiresIn: '7d' });
 }
+
+function verifyAdmin(req, res, next) {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!token) return res.status(401).json({ success: false, message: 'Admin authentication required' });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (decoded.role !== 'admin') throw new Error('Not admin');
+    req.admin = decoded;
+    return next();
+  } catch (_) {
+    return res.status(401).json({ success: false, message: 'Invalid or expired admin token' });
+  }
+}
+
+function formatNaira(amount) {
+  return `₦${Number(amount || 0).toLocaleString('en-NG', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+}
+
+function formatDateWAT(date) {
+  return new Date(date).toLocaleString('en-NG', {
+    timeZone: 'Africa/Lagos',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true
+  });
+}
+
+function slugify(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'file';
+}
+
+function getPublicBaseUrl(req) {
+  if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL.replace(/\/$/, '');
+  if (req) {
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+    return `${protocol}://${req.get('host')}`;
+  }
+  return `http://localhost:${PORT}`;
+}
+
+function buildPublicFileUrl(relativePath, req) {
+  return `${getPublicBaseUrl(req)}${relativePath.startsWith('/') ? relativePath : `/${relativePath}`}`;
+}
+
+function mapProduct(product) {
+  return {
+    id: `db_${product._id}`,
+    _id: product._id,
+    name: product.name,
+    price: product.price,
+    category: product.category,
+    description: product.description,
+    image: product.image,
+    images: product.images && product.images.length ? product.images : [product.image, product.image, product.image],
+    tag: product.tag,
+    outOfStock: product.outOfStock,
+    sold: product.sold,
+    statusIndicator: product.statusIndicator
+  };
+}
+
+function serializeOrder(order, req) {
+  const timeline = Array.isArray(order.statusTimeline) ? order.statusTimeline.map((entry) => ({
+    status: entry.status,
+    label: entry.label,
+    note: entry.note || '',
+    by: entry.by || '',
+    at: entry.at
+  })) : [];
+
+  return {
+    id: String(order._id),
+    _id: String(order._id),
+    orderRef: order.orderRef,
+    reference: order.orderRef,
+    paymentMethod: order.paymentMethod,
+    status: order.status,
+    email: order.email,
+    customerName: order.customerName,
+    customerPhone: order.customerPhone,
+    amount: order.amount,
+    subtotal: order.subtotal,
+    shippingFee: order.shippingFee,
+    shippingState: order.shippingState,
+    items: order.items,
+    transactionId: order.transactionId || '',
+    proofUrl: order.proofUrl ? buildPublicFileUrl(order.proofUrl, req) : '',
+    receiptPdfUrl: order.receiptPdfUrl ? buildPublicFileUrl(order.receiptPdfUrl, req) : '',
+    verifiedAt: order.verifiedAt,
+    verifiedBy: order.verifiedBy,
+    createdAt: order.createdAt,
+    updatedAt: order.updatedAt,
+    paymentDate: order.verifiedAt || order.createdAt,
+    statusTimeline: timeline,
+    metadata: {
+      customer_name: order.customerName,
+      customer_phone: order.customerPhone,
+      shipping_state: order.shippingState,
+      shipping_fee: order.shippingFee,
+      cart_items: order.items,
+      transaction_id: order.transactionId || '',
+      proof_url: order.proofUrl ? buildPublicFileUrl(order.proofUrl, req) : '',
+      receipt_pdf_url: order.receiptPdfUrl ? buildPublicFileUrl(order.receiptPdfUrl, req) : ''
+    }
+  };
+}
+
+function pushTimeline(order, status, label, by = '', note = '') {
+  order.statusTimeline = Array.isArray(order.statusTimeline) ? order.statusTimeline : [];
+  order.statusTimeline.push({ status, label, by, note, at: new Date() });
+}
+
+async function generateUniqueOrderRef() {
+  const date = new Date();
+  const datePart = `${date.getUTCFullYear()}${String(date.getUTCMonth() + 1).padStart(2, '0')}${String(date.getUTCDate()).padStart(2, '0')}`;
+  for (let i = 0; i < 10; i += 1) {
+    const randomPart = crypto.randomBytes(4).toString('hex').slice(0, 8).toUpperCase();
+    const orderRef = `FORTUNE-${datePart}-${randomPart}`;
+    const existing = await Order.findOne({ orderRef }).select('_id').lean();
+    if (!existing) return orderRef;
+  }
+  throw new Error('Could not generate unique order reference');
+}
+
+function emailShell({ title, eyebrow, body, accent = '#667eea' }) {
+  return `<!DOCTYPE html>
+  <html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${title}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f4f6fb;font-family:Segoe UI,Arial,sans-serif;color:#1f2937;">
+    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f6fb;padding:24px 12px;">
+      <tr>
+        <td align="center">
+          <table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:640px;background:#ffffff;border-radius:18px;overflow:hidden;box-shadow:0 12px 40px rgba(17,24,39,.12);">
+            <tr>
+              <td style="padding:28px 28px 18px;background:linear-gradient(135deg, ${accent} 0%, #764ba2 100%);color:#fff;">
+                <div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;opacity:.92;font-weight:700;">${eyebrow}</div>
+                <h1 style="margin:10px 0 0;font-size:28px;line-height:1.2;">${title}</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:28px;">${body}</td>
+            </tr>
+            <tr>
+              <td style="padding:18px 28px;background:#f8f9ff;border-top:1px solid #e5e7eb;color:#6b7280;font-size:12px;line-height:1.6;">
+                FortuneHub manual Opay transfer system<br/>
+                ${OWNER_EMAIL ? `Need help? Reply to this email or contact <a href="mailto:${OWNER_EMAIL}" style="color:${accent};text-decoration:none;">${OWNER_EMAIL}</a>.` : 'Need help? Reply to this email.'}
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>`;
+}
+
+function timelineHtml(order) {
+  const steps = [
+    { key: 'pending_payment', label: 'Order created' },
+    { key: 'awaiting_verification', label: 'Proof uploaded' },
+    { key: 'paid', label: 'Payment verified' }
+  ];
+  const doneStatuses = new Set((order.statusTimeline || []).map((entry) => entry.status));
+  return `<div style="margin:18px 0 0;">
+    ${steps.map((step, index) => {
+      const done = doneStatuses.has(step.key) || (step.key === 'pending_payment');
+      return `<div style="display:flex;align-items:flex-start;gap:12px;${index < steps.length - 1 ? 'margin-bottom:12px;' : ''}">
+        <div style="width:14px;height:14px;border-radius:999px;margin-top:4px;background:${done ? '#10b981' : '#d1d5db'};"></div>
+        <div>
+          <div style="font-weight:700;color:#111827;">${step.label}</div>
+          <div style="font-size:12px;color:#6b7280;">${done ? 'Completed' : 'Waiting'}</div>
+        </div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+function buildAdminProofEmail(order, req) {
+  const proofLink = order.proofUrl ? buildPublicFileUrl(order.proofUrl, req) : '#';
+  const itemsRows = order.items.map((item) => `<tr>
+      <td style="padding:10px 0;border-bottom:1px solid #eef2f7;">${item.name}</td>
+      <td style="padding:10px 0;border-bottom:1px solid #eef2f7;text-align:center;">${item.quantity}</td>
+      <td style="padding:10px 0;border-bottom:1px solid #eef2f7;text-align:right;">${formatNaira(Number(item.price) * Number(item.quantity || 1))}</td>
+    </tr>`).join('');
+
+  return emailShell({
+    title: 'Payment proof uploaded',
+    eyebrow: 'Admin notification',
+    accent: '#f59e0b',
+    body: `
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;">A customer has uploaded payment proof for order <strong>${order.orderRef}</strong> and the order is now awaiting verification.</p>
+      <div style="background:#fffaf0;border:1px solid #fde68a;border-radius:14px;padding:18px;margin-bottom:18px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:14px;">
+          <div><strong>Customer:</strong> ${order.customerName}</div>
+          <div><strong>Email:</strong> ${order.email}</div>
+          <div><strong>Phone:</strong> ${order.customerPhone}</div>
+          <div><strong>Total:</strong> ${formatNaira(order.amount)}</div>
+          <div><strong>Shipping:</strong> ${order.shippingState || 'N/A'}</div>
+          <div><strong>Txn ID:</strong> ${order.transactionId || 'Not provided'}</div>
+        </div>
+      </div>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:18px;font-size:14px;">
+        <thead>
+          <tr>
+            <th style="text-align:left;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Item</th>
+            <th style="text-align:center;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Qty</th>
+            <th style="text-align:right;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Amount</th>
+          </tr>
+        </thead>
+        <tbody>${itemsRows}</tbody>
+      </table>
+      <div style="display:flex;flex-wrap:wrap;gap:12px;">
+        <a href="${proofLink}" style="display:inline-block;background:#111827;color:#fff;text-decoration:none;padding:12px 18px;border-radius:10px;font-weight:700;">View uploaded proof</a>
+        <a href="${ADMIN_PANEL_URL}" style="display:inline-block;background:#f59e0b;color:#111827;text-decoration:none;padding:12px 18px;border-radius:10px;font-weight:700;">Open admin dashboard</a>
+      </div>
+      ${timelineHtml(order)}
+    `
+  });
+}
+
+function buildBuyerReceiptEmail(order, req) {
+  const receiptLink = order.receiptPdfUrl ? buildPublicFileUrl(order.receiptPdfUrl, req) : '#';
+  const itemsRows = order.items.map((item) => `<tr>
+      <td style="padding:10px 0;border-bottom:1px solid #eef2f7;">${item.name}</td>
+      <td style="padding:10px 0;border-bottom:1px solid #eef2f7;text-align:center;">${item.quantity}</td>
+      <td style="padding:10px 0;border-bottom:1px solid #eef2f7;text-align:right;">${formatNaira(Number(item.price) * Number(item.quantity || 1))}</td>
+    </tr>`).join('');
+
+  return emailShell({
+    title: 'Your payment has been verified',
+    eyebrow: 'Receipt enclosed',
+    accent: '#10b981',
+    body: `
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;">Hi <strong>${order.customerName}</strong>, your Opay transfer for order <strong>${order.orderRef}</strong> has been verified successfully. Your receipt PDF is attached to this email.</p>
+      <div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:14px;padding:18px;margin-bottom:18px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:14px;">
+          <div><strong>Status:</strong> Paid</div>
+          <div><strong>Verified:</strong> ${order.verifiedAt ? formatDateWAT(order.verifiedAt) : '—'}</div>
+          <div><strong>Total:</strong> ${formatNaira(order.amount)}</div>
+          <div><strong>Order ref:</strong> ${order.orderRef}</div>
+          <div><strong>Shipping:</strong> ${order.shippingState || 'N/A'}</div>
+          <div><strong>Transaction ID:</strong> ${order.transactionId || 'Not provided'}</div>
+        </div>
+      </div>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:18px;font-size:14px;">
+        <thead>
+          <tr>
+            <th style="text-align:left;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Item</th>
+            <th style="text-align:center;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Qty</th>
+            <th style="text-align:right;padding:0 0 10px;color:#6b7280;font-size:12px;text-transform:uppercase;">Amount</th>
+          </tr>
+        </thead>
+        <tbody>${itemsRows}</tbody>
+      </table>
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;background:#f8f9ff;border:1px solid #e5e7eb;border-radius:14px;padding:16px;margin-bottom:18px;">
+        <div><div style="font-size:12px;color:#6b7280;text-transform:uppercase;">Subtotal</div><div style="font-size:18px;font-weight:800;">${formatNaira(order.subtotal)}</div></div>
+        <div><div style="font-size:12px;color:#6b7280;text-transform:uppercase;">Shipping</div><div style="font-size:18px;font-weight:800;">${formatNaira(order.shippingFee)}</div></div>
+        <div><div style="font-size:12px;color:#6b7280;text-transform:uppercase;">Total paid</div><div style="font-size:18px;font-weight:800;color:#10b981;">${formatNaira(order.amount)}</div></div>
+      </div>
+      <a href="${receiptLink}" style="display:inline-block;background:#10b981;color:#fff;text-decoration:none;padding:12px 18px;border-radius:10px;font-weight:700;">Download receipt PDF</a>
+      ${timelineHtml(order)}
+    `
+  });
+}
+
+async function sendEmail({ to, subject, html, attachments = [] }) {
+  if (!RESEND_API_KEY || !to) return;
+  try {
+    await resend.emails.send({ from: MAIL_FROM, to, subject, html, attachments });
+  } catch (error) {
+    console.error(`❌ Email send failed (${subject}):`, error.message);
+  }
+}
+
+async function generateReceiptPdf(order, req) {
+  const safeRef = slugify(order.orderRef);
+  const fileName = `${safeRef}.pdf`;
+  const outputPath = path.join(receiptsDir, fileName);
+  const publicPath = `/uploads/receipts/${fileName}`;
+
+  await new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 50, size: 'A4' });
+    const stream = fs.createWriteStream(outputPath);
+    doc.pipe(stream);
+
+    doc.fontSize(24).fillColor('#1f2937').text('FortuneHub Receipt', { align: 'center' });
+    doc.moveDown(0.6);
+    doc.fontSize(12).fillColor('#6b7280').text(`Order Ref: ${order.orderRef}`, { align: 'center' });
+    doc.text(`Issued: ${formatDateWAT(order.verifiedAt || new Date())}`, { align: 'center' });
+    doc.moveDown(1.5);
+
+    doc.fontSize(14).fillColor('#111827').text('Customer Details');
+    doc.moveDown(0.4);
+    doc.fontSize(11).fillColor('#374151');
+    doc.text(`Name: ${order.customerName}`);
+    doc.text(`Email: ${order.email}`);
+    doc.text(`Phone: ${order.customerPhone}`);
+    doc.text(`Shipping State: ${order.shippingState || 'N/A'}`);
+    doc.text(`Payment Method: Opay manual transfer`);
+    doc.text(`Transaction ID: ${order.transactionId || 'Not provided'}`);
+    doc.moveDown(1.2);
+
+    doc.fontSize(14).fillColor('#111827').text('Items');
+    doc.moveDown(0.5);
+
+    const startY = doc.y;
+    doc.fontSize(11).fillColor('#6b7280');
+    doc.text('Item', 50, startY);
+    doc.text('Qty', 320, startY, { width: 50, align: 'center' });
+    doc.text('Price', 400, startY, { width: 140, align: 'right' });
+    doc.moveTo(50, startY + 18).lineTo(545, startY + 18).strokeColor('#e5e7eb').stroke();
+
+    let y = startY + 28;
+    order.items.forEach((item) => {
+      doc.fontSize(11).fillColor('#111827');
+      doc.text(item.name, 50, y, { width: 250 });
+      doc.text(String(item.quantity || 1), 320, y, { width: 50, align: 'center' });
+      doc.text(formatNaira(Number(item.price || 0) * Number(item.quantity || 1)), 400, y, { width: 140, align: 'right' });
+      y += 24;
+    });
+
+    y += 10;
+    doc.moveTo(50, y).lineTo(545, y).strokeColor('#e5e7eb').stroke();
+    y += 15;
+    doc.fontSize(12).fillColor('#374151');
+    doc.text(`Subtotal: ${formatNaira(order.subtotal)}`, 340, y, { width: 200, align: 'right' });
+    y += 20;
+    doc.text(`Shipping: ${formatNaira(order.shippingFee)}`, 340, y, { width: 200, align: 'right' });
+    y += 20;
+    doc.fontSize(14).fillColor('#10b981').text(`Total Paid: ${formatNaira(order.amount)}`, 320, y, { width: 220, align: 'right' });
+
+    y += 40;
+    doc.fontSize(11).fillColor('#6b7280').text(`Verified by: ${order.verifiedBy || 'Admin'}`, 50, y);
+    doc.text('Thank you for shopping with FortuneHub.', 50, y + 20);
+
+    doc.end();
+    stream.on('finish', resolve);
+    stream.on('error', reject);
+  });
+
+  return { outputPath, publicPath, publicUrl: buildPublicFileUrl(publicPath, req) };
+}
+
+const proofStorage = multer.diskStorage({
+  destination(req, file, cb) {
+    cb(null, proofsDir);
+  },
+  filename(req, file, cb) {
+    const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
+    cb(null, `${slugify(req.params.id)}-${Date.now()}${ext}`);
+  }
+});
+
+const uploadProof = multer({
+  storage: proofStorage,
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter(req, file, cb) {
+    const ok = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(file.mimetype);
+    cb(ok ? null : new Error('Only JPG, PNG, WEBP, or PDF files are allowed.'), ok);
+  }
+});
+
+app.get('/ping', (req, res) => res.json({ success: true, message: 'pong' }));
+app.get('/', (req, res) => res.json({ success: true, message: 'FortuneHub backend running' }));
+app.get('/health', (req, res) => res.json({ success: true, status: 'ok', dbState: mongoose.connection.readyState }));
+
+app.get('/api/config/payment', (req, res) => {
+  res.json({
+    success: true,
+    data: {
+      paymentMethod: 'opay_manual',
+      opayAccountName: OPAY_ACCOUNT_NAME,
+      opayAccountPhone: OPAY_ACCOUNT_PHONE,
+      whatsappHelpNumber: OPAY_WHATSAPP_NUMBER,
+      whatsappHelpLink: OPAY_WHATSAPP_NUMBER
+        ? `https://wa.me/${String(OPAY_WHATSAPP_NUMBER).replace(/\D/g, '')}`
+        : '',
+      instructions: [
+        'Transfer the exact order amount to the Opay account/phone shown below.',
+        'Use your order reference as payment narration if possible.',
+        'After payment, upload your transfer proof for manual verification.'
+      ]
+    }
+  });
+});
 
 app.post('/api/auth/google', async (req, res) => {
   try {
     const { credential } = req.body || {};
+    if (!credential) return res.status(400).json({ success: false, message: 'Google credential required' });
+    if (!GOOGLE_CLIENT_ID) return res.status(500).json({ success: false, message: 'GOOGLE_CLIENT_ID not configured on server' });
 
-    if (!credential) {
-      return res.status(400).json({ success: false, message: 'Google credential required' });
-    }
-
-    if (!GOOGLE_CLIENT_ID) {
-      return res.status(500).json({ success: false, message: 'GOOGLE_CLIENT_ID not configured on server' });
-    }
-
-    const ticket = await googleClient.verifyIdToken({
-      idToken: credential,
-      audience: GOOGLE_CLIENT_ID
-    });
-
+    const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: GOOGLE_CLIENT_ID });
     const payload = ticket.getPayload() || {};
     const { sub: googleId, email, name, picture } = payload;
+    if (!email) return res.status(400).json({ success: false, message: 'Google account has no email' });
 
-    if (!email) {
-      return res.status(400).json({ success: false, message: 'Google account has no email' });
-    }
-
-    let user = await User.findOne({
-      $or: [{ email: email.toLowerCase() }, { googleId }]
-    });
-
+    let user = await User.findOne({ $or: [{ email: email.toLowerCase() }, { googleId }] });
     if (!user) {
       user = await User.create({
         googleId,
@@ -448,1902 +670,398 @@ app.post('/api/auth/google', async (req, res) => {
         picture: picture || '',
         authProvider: 'google'
       });
-      console.log(`✅ New Google user registered: ${email}`);
     } else {
       user.googleId = googleId;
-      user.picture = picture || user.picture;
       user.name = name || user.name;
+      user.picture = picture || user.picture;
       await user.save();
     }
 
     const token = issueJWT(user);
-    return res.json({
-      success: true,
-      token,
-      user: {
-        id: user._id,
-        email: user.email,
-        name: user.name,
-        picture: user.picture || '',
-        authProvider: user.authProvider,
-        phone: user.phone || ''
-      }
-    });
+    return res.json({ success: true, token, user: {
+      id: user._id,
+      email: user.email,
+      name: user.name,
+      picture: user.picture || '',
+      authProvider: user.authProvider,
+      phone: user.phone || ''
+    } });
   } catch (error) {
-    console.error('❌ Google auth error:', error?.message || error);
-    return res.status(401).json({
-      success: false,
-      message: 'Google authentication failed: ' + (error?.message || 'Unknown error')
-    });
+    console.error('❌ Google auth error:', error.message);
+    return res.status(401).json({ success: false, message: 'Google authentication failed' });
   }
 });
 
 app.post('/api/auth/signup', async (req, res) => {
   try {
     const { name, email, password } = req.body || {};
-
-    if (!name || !email || !password) {
-      return res.status(400).json({ success: false, message: 'Name, email, and password are required' });
-    }
-
-    if (String(password).length < 6) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
-    }
+    if (!name || !email || !password) return res.status(400).json({ success: false, message: 'Name, email, and password are required' });
+    if (String(password).length < 6) return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
 
     const existing = await User.findOne({ email: String(email).toLowerCase() });
-    if (existing) {
-      return res.status(409).json({
-        success: false,
-        message: 'An account with this email already exists. Please sign in.'
-      });
-    }
+    if (existing) return res.status(409).json({ success: false, message: 'An account with this email already exists. Please sign in.' });
 
-    const hashed = await bcrypt.hash(String(password), 12);
     const user = await User.create({
       name: String(name).trim(),
       email: String(email).toLowerCase().trim(),
-      password: hashed,
+      password: await bcrypt.hash(String(password), 12),
       authProvider: 'email'
     });
 
     const token = issueJWT(user);
-    return res.status(201).json({
-      success: true,
-      token,
-      user: {
-        id: user._id,
-        email: user.email,
-        name: user.name,
-        picture: '',
-        authProvider: 'email',
-        phone: ''
-      }
-    });
+    return res.status(201).json({ success: true, token, user: {
+      id: user._id,
+      email: user.email,
+      name: user.name,
+      picture: '',
+      authProvider: user.authProvider,
+      phone: user.phone || ''
+    } });
   } catch (error) {
-    console.error('❌ Signup error:', error?.message || error);
-    return res.status(500).json({ success: false, message: 'Signup failed: ' + error.message });
+    console.error('❌ Signup error:', error.message);
+    return res.status(500).json({ success: false, message: 'Could not create account' });
   }
 });
 
 app.post('/api/auth/signin', async (req, res) => {
   try {
     const { email, password } = req.body || {};
-
-    if (!email || !password) {
-      return res.status(400).json({ success: false, message: 'Email and password are required' });
-    }
+    if (!email || !password) return res.status(400).json({ success: false, message: 'Email and password are required' });
 
     const user = await User.findOne({ email: String(email).toLowerCase().trim() });
-    if (!user || !user.password) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
-    }
+    if (!user || !user.password) return res.status(401).json({ success: false, message: 'Invalid email or password' });
 
-    const valid = await bcrypt.compare(String(password), user.password);
-    if (!valid) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
-    }
+    const ok = await bcrypt.compare(String(password), user.password);
+    if (!ok) return res.status(401).json({ success: false, message: 'Invalid email or password' });
 
     const token = issueJWT(user);
-    return res.json({
-      success: true,
-      token,
-      user: {
-        id: user._id,
-        email: user.email,
-        name: user.name,
-        picture: user.picture || '',
-        authProvider: user.authProvider,
-        phone: user.phone || ''
-      }
-    });
+    return res.json({ success: true, token, user: {
+      id: user._id,
+      email: user.email,
+      name: user.name,
+      picture: user.picture || '',
+      authProvider: user.authProvider,
+      phone: user.phone || ''
+    } });
   } catch (error) {
-    console.error('❌ Signin error:', error?.message || error);
-    return res.status(500).json({ success: false, message: 'Signin failed: ' + error.message });
+    console.error('❌ Signin error:', error.message);
+    return res.status(500).json({ success: false, message: 'Could not sign in' });
   }
 });
 
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id).select('-password');
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    return res.json({ success: true, user });
-  } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
-  }
+  const user = await User.findById(req.user.id).lean();
+  if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+  return res.json({ success: true, user: {
+    id: user._id,
+    email: user.email,
+    name: user.name,
+    picture: user.picture || '',
+    authProvider: user.authProvider,
+    phone: user.phone || ''
+  } });
 });
 
 app.patch('/api/auth/me', authMiddleware, async (req, res) => {
-  try {
-    const { phone } = req.body || {};
-    const user = await User.findByIdAndUpdate(
-      req.user.id,
-      { phone: phone || '' },
-      { new: true }
-    ).select('-password');
+  const { phone } = req.body || {};
+  const user = await User.findByIdAndUpdate(req.user.id, { phone: String(phone || '').trim() }, { new: true });
+  if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+  return res.json({ success: true, user: {
+    id: user._id,
+    email: user.email,
+    name: user.name,
+    picture: user.picture || '',
+    authProvider: user.authProvider,
+    phone: user.phone || ''
+  } });
+});
 
-    return res.json({ success: true, user });
+app.post('/api/orders', authMiddleware, async (req, res) => {
+  try {
+    const { items, shippingState, shippingFee, customerPhone } = req.body || {};
+    const user = await User.findById(req.user.id).lean();
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ success: false, message: 'Cart items are required' });
+    if (!customerPhone) return res.status(400).json({ success: false, message: 'Customer phone is required' });
+
+    const normalizedItems = items.map((item) => ({
+      productId: String(item.id || item.productId || ''),
+      name: String(item.name || '').trim(),
+      price: Number(item.price || 0),
+      quantity: Math.max(1, Number(item.quantity || 1)),
+      image: String(item.image || '')
+    })).filter((item) => item.name && item.price >= 0);
+
+    if (!normalizedItems.length) return res.status(400).json({ success: false, message: 'No valid cart items supplied' });
+
+    const subtotal = normalizedItems.reduce((sum, item) => sum + (Number(item.price) * Number(item.quantity)), 0);
+    const shipping = Math.max(0, Number(shippingFee || 0));
+    const amount = subtotal + shipping;
+    const orderRef = await generateUniqueOrderRef();
+
+    const order = await Order.create({
+      userId: user._id,
+      email: user.email,
+      customerName: user.name,
+      customerPhone: String(customerPhone).trim(),
+      shippingState: String(shippingState || '').trim(),
+      shippingFee: shipping,
+      subtotal,
+      amount,
+      items: normalizedItems,
+      orderRef,
+      paymentMethod: 'opay_manual',
+      status: 'pending_payment',
+      statusTimeline: [{ status: 'pending_payment', label: 'Order created', note: 'Awaiting bank transfer', by: user.email, at: new Date() }]
+    });
+
+    await User.findByIdAndUpdate(user._id, { phone: String(customerPhone).trim() }).catch(() => {});
+
+    return res.status(201).json({ success: true, message: 'Order created successfully', data: serializeOrder(order, req) });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    console.error('❌ Create order error:', error);
+    return res.status(500).json({ success: false, message: 'Could not create order' });
+  }
+});
+
+app.get('/api/orders/my', authMiddleware, async (req, res) => {
+  const orders = await Order.find({ userId: req.user.id }).sort({ createdAt: -1 });
+  return res.json({ success: true, count: orders.length, data: orders.map((order) => serializeOrder(order, req)) });
+});
+
+app.get('/api/orders/:id', authMiddleware, async (req, res) => {
+  const order = await Order.findById(req.params.id);
+  if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+  if (String(order.userId) !== String(req.user.id)) return res.status(403).json({ success: false, message: 'Not authorized to view this order' });
+  return res.json({ success: true, data: serializeOrder(order, req) });
+});
+
+app.post('/api/orders/:id/proof', authMiddleware, (req, res, next) => {
+  uploadProof.single('proof')(req, res, (error) => {
+    if (error) return res.status(400).json({ success: false, message: error.message });
+    return next();
+  });
+}, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (String(order.userId) !== String(req.user.id)) return res.status(403).json({ success: false, message: 'Not authorized to update this order' });
+    if (!req.file) return res.status(400).json({ success: false, message: 'Payment proof file is required' });
+    if (!['pending_payment', 'failed'].includes(order.status)) {
+      return res.status(400).json({ success: false, message: 'This order is not accepting payment proof uploads' });
+    }
+
+    order.status = 'awaiting_verification';
+    order.transactionId = String(req.body.transactionId || '').trim();
+    order.proofUrl = `/uploads/proofs/${req.file.filename}`;
+    order.proofFileName = req.file.originalname;
+    pushTimeline(order, 'awaiting_verification', 'Proof uploaded', order.email, order.transactionId ? `Transaction ID: ${order.transactionId}` : 'Payment proof submitted');
+    await order.save();
+
+    if (OWNER_EMAIL) {
+      await sendEmail({
+        to: OWNER_EMAIL,
+        subject: `Proof uploaded for ${order.orderRef}`,
+        html: buildAdminProofEmail(order, req)
+      });
+    }
+
+    return res.json({ success: true, message: 'Payment proof uploaded. Awaiting verification.', data: serializeOrder(order, req) });
+  } catch (error) {
+    console.error('❌ Upload proof error:', error);
+    return res.status(500).json({ success: false, message: 'Could not upload payment proof' });
   }
 });
 
 app.get('/api/transactions/my', authMiddleware, async (req, res) => {
-  try {
-    const page = Math.max(1, parseInt(req.query.page || '1', 10));
-    const limit = Math.min(50, parseInt(req.query.limit || '20', 10));
-
-    const query = {
-      status: 'success',
-      $or: [
-        { userId: req.user.id },
-        { email: req.user.email }
-      ]
-    };
-
-    const total = await Payment.countDocuments(query);
-    const transactions = await Payment.find(query)
-      .sort({ paymentDate: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
-
-    return res.json({
-      success: true,
-      data: transactions,
-      pagination: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit)
-      }
-    });
-  } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
-  }
+  const orders = await Order.find({ userId: req.user.id }).sort({ createdAt: -1 });
+  return res.json({ success: true, count: orders.length, data: orders.map((order) => serializeOrder(order, req)) });
 });
 
 app.get('/api/transactions/receipt/:reference', authMiddleware, async (req, res) => {
-  try {
-    const payment = await Payment.findOne({
-      reference: req.params.reference,
-      $or: [
-        { userId: req.user.id },
-        { email: req.user.email }
-      ]
-    }).lean();
-
-    if (!payment) {
-      return res.status(404).json({ success: false, message: 'Receipt not found' });
-    }
-
-    return res.json({ success: true, data: payment });
-  } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
-  }
+  const order = await Order.findOne({ orderRef: req.params.reference, userId: req.user.id });
+  if (!order) return res.status(404).json({ success: false, message: 'Receipt not found' });
+  return res.json({ success: true, data: serializeOrder(order, req) });
 });
 
-// ===================================================
-// 6) ROUTES
-// ===================================================
-
-// ✅ FIX PERFORMANCE: Add /ping endpoint for external uptime monitors.
-// Since Render free plan spins down after 15 minutes of inactivity,
-// register this URL with a FREE external service to ping every 10–14 minutes:
-//   • UptimeRobot (https://uptimerobot.com) — free, pings every 5 min
-//   • cron-job.org (https://cron-job.org) — free cron HTTP requests
-//   • BetterUptime (https://betterstack.com/better-uptime) — free tier
-// Ping URL: https://fortunehub-backend.onrender.com/ping
-// This prevents the cold-start delay that caused ERR_TIMED_OUT in PageSpeed.
-app.get('/ping', (req, res) => {
-  res.json({ pong: true, timestamp: new Date().toISOString() });
-});
-
-app.get('/', (req, res) => {
-  res.json({
-    status:    'OK',
-    message:   'FortuneHub Backend API is running',
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      verify:   '/api/payment/verify?reference=xxx',
-      webhook:  '/api/payment/webhook/paystack',
-      currency: 'NGN (Nigerian Naira ₦)',
-      payments: '/api/payments',
-      admin:    '/api/admin/login',
-      health:   '/health'
-    }
-  });
-});
-
-app.get('/health', (req, res) => {
-  res.json({
-    status:   'healthy',
-    mongodb:  mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    resend:   RESEND_API_KEY  ? 'configured' : 'missing',
-    mailFrom: MAIL_FROM,
-    paystack: PAYSTACK_SECRET_KEY ? 'configured' : 'missing',
-    google:   GOOGLE_CLIENT_ID ? 'configured' : 'missing',
-    auth:     'jwt'
-  });
-});
-
-// Handles both GET + POST
-app.get('/api/payment/verify',  async (req, res) => handlePaymentVerification(req, res));
-app.post('/api/payment/verify', async (req, res) => handlePaymentVerification(req, res));
-
-// ===================================================
-// 6.1) INITIALIZE PAYSTACK TRANSACTION (RECOMMENDED)
-//      Fixes Paystack popup "We could not start this transaction"
-//      by creating a transaction on the server first.
-// ===================================================
-app.post('/api/payment/initialize', async (req, res) => {
-  try {
-    if (!PAYSTACK_SECRET_KEY) {
-      console.error('❌ PAYSTACK_SECRET_KEY is not set in environment variables!');
-      return res.status(500).json({
-        success: false,
-        message: 'Server misconfigured: PAYSTACK_SECRET_KEY is missing. Set it in your Render/hosting environment variables.'
-      });
-    }
-
-    // ✅ FIX: Warn if public key is missing — this causes key mismatch in frontend
-    if (!PAYSTACK_PUBLIC_KEY) {
-      console.warn('⚠️  PAYSTACK_PUBLIC_KEY is not set! The frontend may use a mismatched public key,');
-      console.warn('⚠️  causing "We could not start this transaction". Set PAYSTACK_PUBLIC_KEY in Render env vars.');
-      console.warn('⚠️  It should match the same Paystack account as your PAYSTACK_SECRET_KEY.');
-    }
-
-    const email = String(req.body?.email || '').trim();
-    const amountNaira = Number(req.body?.amount);
-    const rawMetadata = req.body?.metadata || {};
-
-    let userId = null;
-    const authHeader = req.headers.authorization || '';
-    if (authHeader.startsWith('Bearer ')) {
-      try {
-        const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET);
-        userId = decoded.id || null;
-      } catch (_) {}
-    }
-
-    if (!userId && email) {
-      const foundUser = await User.findOne({ email: email.toLowerCase() }).select('_id');
-      if (foundUser) userId = foundUser._id;
-    }
-
-    // ✅ FIX: Strip base64 images from cart_items before sending to Paystack.
-    // Paystack rejects metadata larger than ~5KB. Admin-panel products store images
-    // as base64 data URLs (data:image/...) which can be 50–300 KB each. When such
-    // a product is in the cart the metadata blows up Paystack's limit, causing
-    // "We could not start this transaction / Unknown error occurred".
-    // products.json products use short relative paths so they were NOT affected.
-    function sanitizeMetadataForPaystack(meta) {
-      const out = Object.assign({}, meta);
-      if (Array.isArray(out.cart_items)) {
-        out.cart_items = out.cart_items.map(function(item) {
-          const img = String(item.image || '');
-          // Remove base64 data URLs and any URL longer than 300 chars
-          const safeImg = (img.startsWith('data:') || img.length > 300) ? '' : img;
-          return Object.assign({}, item, { image: safeImg });
-        });
-      }
-      return out;
-    }
-
-    const metadata = sanitizeMetadataForPaystack(rawMetadata);
-
-    if (!email) {
-      return res.status(400).json({ success: false, message: 'Email is required' });
-    }
-
-    if (!Number.isFinite(amountNaira) || amountNaira <= 0) {
-      return res.status(400).json({ success: false, message: 'Amount must be a number greater than 0 (in Naira)' });
-    }
-
-    const amountKobo = Math.round(amountNaira * 100);
-
-    // Initialize with Paystack — currency MUST be 'NGN' (Naira)
-    // Amount is in KOBO (Naira × 100) as required by Paystack
-    // metadata is already sanitized above (base64 images stripped)
-    const initRes = await paystackRequest('/transaction/initialize', 'POST', {
-      email,
-      amount: amountKobo,   // kobo = naira * 100
-      currency: 'NGN',
-      metadata
-    });
-
-    const initData = initRes.data || {};
-
-    if (!initRes.ok || !initData.status) {
-      console.error('❌ Paystack initialize failed:', initData);
-      return res.status(400).json({
-        success: false,
-        message: initData.message || 'Failed to initialize transaction',
-        error: initData
-      });
-    }
-
-    const reference = initData.data?.reference;
-    const access_code = initData.data?.access_code;
-
-    // Save as pending in DB (helps admin payments list show attempts)
-    if (reference) {
-      try {
-        await Payment.findOneAndUpdate(
-          { reference },
-          {
-            reference,
-            email,
-            amount: amountNaira, // store in NAIRA
-            currency: 'NGN',
-            status: 'pending',
-            metadata,
-            paymentDate: new Date(),
-            ...(userId && { userId })
-          },
-          { upsert: true, new: true }
-        );
-      } catch (dbErr) {
-        console.log('ℹ️  Initialize: could not save pending payment (non-fatal):', dbErr.message);
-      }
-    }
-
-    return res.json({
-      success: true,
-      message: 'Transaction initialized',
-      reference,
-      access_code,
-      // ✅ FIX: Return public key so frontend uses the SAME account's key in PaystackPop.setup()
-      // This prevents "We could not start this transaction" caused by mismatched public/secret keys.
-      public_key: PAYSTACK_PUBLIC_KEY  // ✅ Always returned (empty string if not set in env)
-    });
-  } catch (err) {
-    console.error('❌ Initialize payment error:', err);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to initialize transaction',
-      error: err.message
-    });
-  }
-});
-
-async function handlePaymentVerification(req, res) {
-  try {
-    const reference = req.query.reference || req.body?.reference;
-
-    console.log('🔍 Verifying payment:', reference);
-    console.log('🌐 Request origin:',    req.headers.origin);
-    console.log('📥 Request method:',    req.method);
-
-    if (!reference) {
-      return res.status(400).json({ success: false, message: 'Payment reference is required' });
-    }
-
-    // If already success — skip Paystack call but retry email if not sent
-    const existingPayment = await Payment.findOne({ reference });
-    if (existingPayment && existingPayment.status === 'success') {
-      if (existingPayment.emailSent) {
-        console.log('✅ Payment already verified and email already sent:', reference);
-        return res.status(200).json({
-          success:   true,
-          message:   'Payment already verified',
-          emailSent: true,
-          data: {
-            reference:   existingPayment.reference,
-            amount:      existingPayment.amount,
-            email:       existingPayment.email,
-            status:      existingPayment.status,
-            paymentDate: existingPayment.paymentDate
-          }
-        });
-      }
-
-      // Retry email
-      let resent = false;
-      try {
-        await sendPaymentEmails({
-          toEmail:     existingPayment.email,
-          reference:   existingPayment.reference,
-          amountNaira: existingPayment.amount,
-          currency:    existingPayment.currency || 'NGN',
-          paidAt:      existingPayment.paymentDate || new Date(),
-          metadata:    existingPayment.metadata || {}
-        });
-        await Payment.findOneAndUpdate({ reference }, { emailSent: true });
-        console.log('✅ Emails re-sent successfully');
-        resent = true;
-      } catch (e) {
-        console.error('❌ Email re-send failed:', e?.message || e);
-      }
-
-      return res.status(200).json({
-        success:   true,
-        message:   resent
-          ? 'Payment verified and email was sent successfully'
-          : 'Payment verified but email still not sent (check backend logs / Resend settings)',
-        emailSent: resent,
-        data: {
-          reference:   existingPayment.reference,
-          amount:      existingPayment.amount,
-          currency:    existingPayment.currency || 'NGN',
-          email:       existingPayment.email,
-          status:      existingPayment.status,
-          paymentDate: existingPayment.paymentDate
-        }
-      });
-    }
-
-    if (!PAYSTACK_SECRET_KEY) {
-      return res.status(500).json({
-        success: false,
-        message: 'Server misconfigured: PAYSTACK_SECRET_KEY is missing'
-      });
-    }
-
-    console.log('📡 Calling Paystack verify endpoint...');
-
-    const paystackResponse = await paystackRequest(`/transaction/verify/${reference}`, 'GET');
-
-    if (!paystackResponse.ok) {
-      console.error('❌ Paystack API error:', paystackResponse.status, paystackResponse.data);
-      return res.status(400).json({
-        success: false,
-        message: 'Failed to verify payment with Paystack',
-        error:   `API returned ${paystackResponse.status}`
-      });
-    }
-
-    const paymentData = paystackResponse.data;
-    console.log('📦 Paystack response status:', paymentData.status);
-    console.log('📦 Paystack payment status:',  paymentData.data?.status);
-
-    if (!paymentData.status || paymentData.data.status !== 'success') {
-      console.log('❌ Payment verification failed:', paymentData.message);
-      return res.status(400).json({
-        success: false,
-        message: paymentData.message || 'Payment verification failed',
-        error:   paymentData.message
-      });
-    }
-
-    const { customer, amount, currency, metadata, paid_at } = paymentData.data;
-    const customerEmail = customer?.email;
-    const amountNaira   = amount / 100;
-
-    console.log('💰 Payment details:', { email: customerEmail, amountNaira, currency });
-
-    let userId = null;
-    const authHeader = req.headers.authorization || '';
-    if (authHeader.startsWith('Bearer ')) {
-      try {
-        const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET);
-        userId = decoded.id || null;
-      } catch (_) {}
-    }
-
-    if (!userId && customerEmail) {
-      const foundUser = await User.findOne({ email: customerEmail.toLowerCase() }).select('_id');
-      if (foundUser) userId = foundUser._id;
-    }
-
-    const payment = await Payment.findOneAndUpdate(
-      { reference },
-      {
-        reference,
-        email:       customerEmail,
-        amount:      amountNaira,
-        currency:    currency || 'NGN',
-        status:      'success',
-        metadata,
-        paymentDate: paid_at ? new Date(paid_at) : new Date(),
-        ...(userId && { userId })
-      },
-      { upsert: true, new: true }
-    );
-
-    console.log('💾 Payment saved to database:', payment._id);
-
-    // Send rich confirmation emails (customer + owner)
-    let emailSent = false;
-    try {
-      await sendPaymentEmails({
-        toEmail:     customerEmail,
-        reference,
-        amountNaira,
-        currency:    currency || 'NGN',
-        paidAt:      paid_at ? new Date(paid_at) : new Date(),
-        metadata:    metadata || {}
-      });
-
-      console.log('✅ Emails sent successfully');
-      emailSent = true;
-      await Payment.findOneAndUpdate({ reference }, { emailSent: true });
-    } catch (e) {
-      console.error('❌ Email sending failed:', e);
-      console.error('Email error details:', e?.message || e);
-    }
-
-    return res.status(200).json({
-      success:   true,
-      message:   emailSent
-        ? 'Payment verified and email sent successfully'
-        : 'Payment verified successfully (email not sent — check Resend configuration)',
-      emailSent,
-      data: {
-        reference,
-        amount:      amountNaira,
-        currency:    currency || 'NGN',
-        email:       customerEmail,
-        status:      'success',
-        paymentDate: paid_at || new Date().toISOString()
-      }
-    });
-  } catch (error) {
-    console.error('❌ Payment verification error:', error);
-    console.error('Error stack:', error.stack);
-    return res.status(500).json({
-      success: false,
-      message: 'An error occurred while verifying payment',
-      error:   error.message
-    });
-  }
-}
-
-// ===================================================
-// 7) ADMIN ROUTES - NEW
-// ===================================================
-
-// Admin login endpoint (simple authentication)
 app.post('/api/admin/login', async (req, res) => {
-  try {
-    const { username, password } = req.body;
+  const { username, password } = req.body || {};
+  if (username !== ADMIN_USERNAME || password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ success: false, message: 'Invalid admin credentials' });
+  }
+  return res.json({ success: true, token: issueAdminJWT(), admin: { username: ADMIN_USERNAME, name: ADMIN_DISPLAY_NAME } });
+});
 
-    if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-      // In production, use JWT tokens
-      return res.json({
-        success: true,
-        message: 'Login successful',
-        token: Buffer.from(`${username}:${password}`).toString('base64')
-      });
+app.get('/api/admin/summary', verifyAdmin, async (req, res) => {
+  const [productCount, pendingCount, paidCount, awaitingCount, revenueAgg] = await Promise.all([
+    Product.countDocuments(),
+    Order.countDocuments({ status: 'pending_payment' }),
+    Order.countDocuments({ status: 'paid' }),
+    Order.countDocuments({ status: 'awaiting_verification' }),
+    Order.aggregate([{ $match: { status: 'paid' } }, { $group: { _id: null, total: { $sum: '$amount' } } }])
+  ]);
+  return res.json({ success: true, data: {
+    productCount,
+    pendingPaymentCount: pendingCount,
+    awaitingVerificationCount: awaitingCount,
+    paidOrderCount: paidCount,
+    totalRevenue: revenueAgg[0]?.total || 0
+  } });
+});
+
+app.get('/api/admin/orders/pending', verifyAdmin, async (req, res) => {
+  const orders = await Order.find({ status: 'awaiting_verification' }).sort({ updatedAt: -1 });
+  return res.json({ success: true, count: orders.length, data: orders.map((order) => serializeOrder(order, req)) });
+});
+
+app.get('/api/admin/orders', verifyAdmin, async (req, res) => {
+  const { status = '', q = '' } = req.query;
+  const filter = {};
+  if (status) filter.status = status;
+  if (q) {
+    const regex = new RegExp(String(q).trim(), 'i');
+    filter.$or = [
+      { orderRef: regex },
+      { email: regex },
+      { customerName: regex },
+      { customerPhone: regex },
+      { transactionId: regex }
+    ];
+  }
+  const orders = await Order.find(filter).sort({ updatedAt: -1, createdAt: -1 }).limit(200);
+  return res.json({ success: true, count: orders.length, data: orders.map((order) => serializeOrder(order, req)) });
+});
+
+app.get('/api/admin/orders/:id', verifyAdmin, async (req, res) => {
+  const order = await Order.findById(req.params.id);
+  if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+  return res.json({ success: true, data: serializeOrder(order, req) });
+});
+
+app.put('/api/admin/orders/:id/verify', verifyAdmin, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order.status === 'paid') return res.json({ success: true, message: 'Order already verified', data: serializeOrder(order, req) });
+    if (order.status !== 'awaiting_verification') {
+      return res.status(400).json({ success: false, message: 'Only awaiting_verification orders can be marked paid' });
     }
 
-    return res.status(401).json({
-      success: false,
-      message: 'Invalid credentials'
+    order.status = 'paid';
+    order.verifiedAt = new Date();
+    order.verifiedBy = req.admin.username || ADMIN_USERNAME;
+    pushTimeline(order, 'paid', 'Payment verified', order.verifiedBy, 'Admin marked order as paid');
+
+    const receipt = await generateReceiptPdf(order, req);
+    order.receiptPdfUrl = receipt.publicPath;
+    await order.save();
+
+    const pdfBase64 = fs.readFileSync(receipt.outputPath).toString('base64');
+    await sendEmail({
+      to: order.email,
+      subject: `Your FortuneHub receipt for ${order.orderRef}`,
+      html: buildBuyerReceiptEmail(order, req),
+      attachments: [{ filename: path.basename(receipt.outputPath), content: pdfBase64 }]
     });
+
+    return res.json({ success: true, message: 'Order verified successfully', data: serializeOrder(order, req) });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('❌ Verify order error:', error);
+    return res.status(500).json({ success: false, message: 'Could not verify order' });
   }
 });
 
-// Middleware to verify admin authentication
-function verifyAdmin(req, res, next) {
-  const authHeader = req.headers.authorization;
-  
-  if (!authHeader) {
-    return res.status(401).json({ success: false, message: 'No authorization header' });
-  }
-
-  const token = authHeader.replace('Basic ', '');
-  const decoded = Buffer.from(token, 'base64').toString('utf-8');
-  const [username, password] = decoded.split(':');
-
-  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-    next();
-  } else {
-    return res.status(401).json({ success: false, message: 'Unauthorized' });
-  }
-}
-
-// Get all payments with pagination and filters
-app.get('/api/admin/payments', verifyAdmin, async (req, res) => {
-  try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 50;
-    const status = req.query.status;
-    const search = req.query.search;
-    const startDate = req.query.startDate;
-    const endDate = req.query.endDate;
-
-    const query = {};
-
-    // Filter by status
-    if (status && status !== 'all') {
-      query.status = status;
-    }
-
-    // Search by reference or email
-    if (search) {
-      query.$or = [
-        { reference: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } }
-      ];
-    }
-
-    // Filter by date range
-    if (startDate || endDate) {
-      query.createdAt = {};
-      if (startDate) query.createdAt.$gte = new Date(startDate);
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        query.createdAt.$lte = end;
-      }
-    }
-
-    const total = await Payment.countDocuments(query);
-    const payments = await Payment.find(query)
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .skip((page - 1) * limit);
-
-    // Calculate statistics
-    const stats = await Payment.aggregate([
-      { $match: query },
-      {
-        $group: {
-          _id: null,
-          // ✅ FIX: totalAmount counts ALL transactions (including pending/cancelled)
-          // successAmount counts ONLY confirmed successful payments — used as true revenue
-          totalAmount:   { $sum: '$amount' },
-          successAmount: { $sum: { $cond: [{ $eq: ['$status', 'success'] }, '$amount', 0] } },
-          totalCount:    { $sum: 1 },
-          successCount:  { $sum: { $cond: [{ $eq: ['$status', 'success']   }, 1, 0] } },
-          pendingCount:  { $sum: { $cond: [{ $eq: ['$status', 'pending']   }, 1, 0] } },
-          failedCount:   { $sum: { $cond: [{ $eq: ['$status', 'failed']    }, 1, 0] } },
-          cancelledCount:{ $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } }
-        }
-      }
-    ]);
-
-    res.json({
-      success: true,
-      data: payments,
-      pagination: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit)
-      },
-      stats: stats[0] || { totalAmount: 0, successAmount: 0, successCount: 0, pendingCount: 0, failedCount: 0, cancelledCount: 0 }
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// Get payment details by ID
-app.get('/api/admin/payments/:id', verifyAdmin, async (req, res) => {
-  try {
-    const payment = await Payment.findById(req.params.id);
-    if (!payment) {
-      return res.status(404).json({ success: false, message: 'Payment not found' });
-    }
-
-    // ✅ FIX: Enrich cart_items with product images from DB.
-    // Images are intentionally stripped from metadata before saving to Paystack (to keep
-    // metadata under 5KB). This restores them so the admin payment detail modal can show
-    // product thumbnails in the Order Items section.
-    const paymentObj = payment.toObject();
-    const cartItems = paymentObj?.metadata?.cart_items;
-    if (Array.isArray(cartItems) && cartItems.length) {
-      const enriched = await Promise.all(cartItems.map(async (item) => {
-        if (item.image) return item; // already has image, skip lookup
-        let prod = null;
-        try {
-          const mongoose = require('mongoose');
-          if (item.id) {
-            // item.id may be a plain ObjectId string or 'db_<ObjectId>'
-            const rawId = String(item.id).replace(/^db_/, '');
-            if (mongoose.Types.ObjectId.isValid(rawId)) {
-              prod = await Product.findById(rawId).select('image images').lean();
-            }
-          }
-          if (!prod && item.name) {
-            prod = await Product.findOne({ name: item.name }).select('image images').lean();
-          }
-        } catch (e) {
-          console.warn('⚠️  Could not enrich cart item image for admin detail view:', e.message);
-        }
-        if (prod) {
-          const img = (Array.isArray(prod.images) && prod.images.find(Boolean)) || prod.image || '';
-          return Object.assign({}, item, { image: img });
-        }
-        return item;
-      }));
-      if (paymentObj.metadata) paymentObj.metadata.cart_items = enriched;
-    }
-
-    res.json({ success: true, data: paymentObj });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-
-// ===================================================
-// CANCEL PAYMENT ROUTE
-// Called by frontend when user closes/cancels Paystack popup
-// Updates status from 'pending' → 'cancelled'
-// ===================================================
-app.patch('/api/payment/cancel', async (req, res) => {
-  try {
-    const { reference } = req.body;
-    if (!reference) {
-      return res.status(400).json({ success: false, message: 'Payment reference is required' });
-    }
-
-    // Only update if currently pending — do NOT downgrade a successful payment
-    const payment = await Payment.findOneAndUpdate(
-      { reference, status: 'pending' },
-      { status: 'cancelled' },
-      { new: true }
-    );
-
-    if (!payment) {
-      // Payment may already be success or doesn't exist — return OK silently
-      return res.json({ success: true, message: 'No pending payment found to cancel (may already be successful)' });
-    }
-
-    console.log(`🚫 Payment cancelled by user: ${reference}`);
-    return res.json({ success: true, message: 'Payment marked as cancelled', reference });
-  } catch (error) {
-    console.error('❌ Cancel payment error:', error);
-    return res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// Admin: Clear all transactions (DELETE endpoint)
-// ⚠️ IMPORTANT: This route MUST be defined BEFORE /api/admin/payments/:id
-// Express matches routes in order — if :id comes first, "clear-all" is treated as an ID
-app.delete('/api/admin/payments/clear-all', verifyAdmin, async (req, res) => {
-  try {
-    const result = await Payment.deleteMany({});
-    console.log(`✅ Cleared ${result.deletedCount} transaction(s) from database`);
-    res.json({ 
-      success: true, 
-      message: `Successfully cleared ${result.deletedCount} transaction(s)`,
-      deletedCount: result.deletedCount 
-    });
-  } catch (error) {
-    console.error('❌ Error clearing transactions:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// Admin: Delete a single transaction by ID
-app.delete('/api/admin/payments/:id', verifyAdmin, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const payment = await Payment.findByIdAndDelete(id);
-    if (!payment) {
-      return res.status(404).json({ success: false, message: 'Transaction not found' });
-    }
-    console.log(`✅ Deleted transaction: ${id}`);
-    res.json({ success: true, message: 'Transaction deleted successfully' });
-  } catch (error) {
-    console.error('❌ Error deleting transaction:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// Admin: list last 50 payments (kept for backward compatibility)
-app.get('/api/payments', async (req, res) => {
-  try {
-    const payments = await Payment.find().sort({ createdAt: -1 }).limit(50);
-    res.json({ success: true, count: payments.length, data: payments });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// ===================================================
-
-// ===================================================
-// PRODUCT MANAGEMENT — INSERT AFTER SECTION 7 (Admin Routes)
-// in server.js — PASTE BEFORE the "8) UTILITY" section
-// ===================================================
-
-// ===================================================
-// 7b) PRODUCT MODEL
-// ===================================================
-const productSchema = new mongoose.Schema({
-  name:            { type: String, required: true },
-  price:           { type: Number, required: true },  // stored in Naira
-  category:        { type: String, required: true },
-  description:     { type: String, default: '' },
-  image:           { type: String, default: '' },     // primary image (base64 or URL)
-  images:          [{ type: String }],                // array of up to 4 images
-  tag:             { type: String, default: 'none' }, // 'new' | 'sale' | 'none'
-  outOfStock:      { type: Boolean, default: false },
-  sold:            { type: Boolean, default: false },
-  statusIndicator: { type: String, default: 'available' },
-  createdAt:       { type: Date, default: Date.now }
-});
-
-const Product = mongoose.model('Product', productSchema);
-
-// ===================================================
-// 7c) PRODUCT ROUTES
-// ===================================================
-
-// GET all products (PUBLIC - used by frontend)
-// ✅ FIX PERFORMANCE: Added Cache-Control header.
-// Products rarely change in real-time, so we allow the browser/CDN to cache
-// for 5 minutes (s-maxage) and reuse stale for 1 minute while revalidating.
-// This reduces repeat requests and improves Lighthouse "Use efficient cache lifetimes" score.
 app.get('/api/products', async (req, res) => {
   try {
-    const dbProducts = await Product.find().sort({ createdAt: -1 });
-
-    // Map to same shape as products.json
-    const mapped = dbProducts.map((p, i) => ({
-      id:              `db_${p._id}`,
-      _id:             p._id,
-      name:            p.name,
-      price:           p.price,
-      category:        p.category,
-      description:     p.description,
-      image:           p.image,
-      images:          p.images && p.images.length ? p.images : [p.image, p.image, p.image],
-      tag:             p.tag,
-      outOfStock:      p.outOfStock,
-      sold:            p.sold,
-      statusIndicator: p.statusIndicator
-    }));
-
-    // ✅ Cache-Control: public (CDN-cacheable), max-age=300 (5 min browser cache),
-    // s-maxage=300 (5 min CDN cache), stale-while-revalidate=60 (serve stale 1 min)
+    const products = await Product.find().sort({ createdAt: -1 });
     res.set('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=60');
-    res.json({ success: true, count: mapped.length, data: mapped });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    return res.json({ success: true, count: products.length, data: products.map(mapProduct) });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// GET single product by mongo _id (ADMIN)
 app.get('/api/products/:id', verifyAdmin, async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
-    res.json({ success: true, data: product });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    return res.json({ success: true, data: product });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// POST create product (ADMIN) — images sent as base64 strings in JSON
 app.post('/api/products', verifyAdmin, async (req, res) => {
   try {
-    const { name, price, category, description, image, images, tag, outOfStock, sold, statusIndicator } = req.body;
-
-    if (!name || !price || !category) {
-      return res.status(400).json({ success: false, message: 'name, price, and category are required' });
-    }
-
-    const product = new Product({
+    const { name, price, category, description, image, images, tag, outOfStock, sold, statusIndicator } = req.body || {};
+    if (!name || !price || !category) return res.status(400).json({ success: false, message: 'name, price, and category are required' });
+    const product = await Product.create({
       name,
-      price:           Number(price),
-      category:        category.toLowerCase(),
-      description:     description || '',
-      image:           image || '',
-      images:          Array.isArray(images) ? images : (image ? [image] : []),
-      tag:             tag || 'none',
-      outOfStock:      Boolean(outOfStock),
-      sold:            Boolean(sold),
+      price: Number(price),
+      category: String(category).toLowerCase(),
+      description: description || '',
+      image: image || '',
+      images: Array.isArray(images) ? images : (image ? [image] : []),
+      tag: tag || 'none',
+      outOfStock: Boolean(outOfStock),
+      sold: Boolean(sold),
       statusIndicator: statusIndicator || 'available'
     });
-
-    await product.save();
-    console.log(`✅ New product created: ${product.name} (${product._id})`);
-    res.status(201).json({ success: true, message: 'Product created successfully', data: product });
-  } catch (err) {
-    console.error('❌ Product create error:', err);
-    res.status(500).json({ success: false, message: err.message });
+    return res.status(201).json({ success: true, message: 'Product created successfully', data: product });
+  } catch (error) {
+    console.error('❌ Product create error:', error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// PUT update product (ADMIN)
 app.put('/api/products/:id', verifyAdmin, async (req, res) => {
   try {
-    const { name, price, category, description, image, images, tag, outOfStock, sold, statusIndicator } = req.body;
-
+    const { name, price, category, description, image, images, tag, outOfStock, sold, statusIndicator } = req.body || {};
     const updateData = {};
-    if (name            !== undefined) updateData.name            = name;
-    if (price           !== undefined) updateData.price           = Number(price);
-    if (category        !== undefined) updateData.category        = category.toLowerCase();
-    if (description     !== undefined) updateData.description     = description;
-    if (image           !== undefined) updateData.image           = image;
-    if (images          !== undefined) updateData.images          = Array.isArray(images) ? images : [image];
-    if (tag             !== undefined) updateData.tag             = tag;
-    if (outOfStock      !== undefined) updateData.outOfStock      = Boolean(outOfStock);
-    if (sold            !== undefined) updateData.sold            = Boolean(sold);
+    if (name !== undefined) updateData.name = name;
+    if (price !== undefined) updateData.price = Number(price);
+    if (category !== undefined) updateData.category = String(category).toLowerCase();
+    if (description !== undefined) updateData.description = description;
+    if (image !== undefined) updateData.image = image;
+    if (images !== undefined) updateData.images = Array.isArray(images) ? images : (image ? [image] : []);
+    if (tag !== undefined) updateData.tag = tag;
+    if (outOfStock !== undefined) updateData.outOfStock = Boolean(outOfStock);
+    if (sold !== undefined) updateData.sold = Boolean(sold);
     if (statusIndicator !== undefined) updateData.statusIndicator = statusIndicator;
 
     const product = await Product.findByIdAndUpdate(req.params.id, updateData, { new: true });
     if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
-
-    console.log(`✅ Product updated: ${product.name} (${product._id})`);
-    res.json({ success: true, message: 'Product updated successfully', data: product });
-  } catch (err) {
-    console.error('❌ Product update error:', err);
-    res.status(500).json({ success: false, message: err.message });
+    return res.json({ success: true, message: 'Product updated successfully', data: product });
+  } catch (error) {
+    console.error('❌ Product update error:', error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// DELETE product (ADMIN)
 app.delete('/api/products/:id', verifyAdmin, async (req, res) => {
   try {
     const product = await Product.findByIdAndDelete(req.params.id);
     if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
-
-    console.log(`✅ Product deleted: ${product.name} (${product._id})`);
-    res.json({ success: true, message: `Product "${product.name}" deleted successfully` });
-  } catch (err) {
-    console.error('❌ Product delete error:', err);
-    res.status(500).json({ success: false, message: err.message });
+    return res.json({ success: true, message: `Product "${product.name}" deleted successfully` });
+  } catch (error) {
+    console.error('❌ Product delete error:', error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// 8) UTILITY: Format currency (Naira)
-// ===================================================
-function formatNaira(amount) {
-  return '₦' + Number(amount || 0).toLocaleString('en-NG', {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0
-  });
-}
+app.use((error, req, res, next) => {
+  console.error('❌ Unhandled error:', error);
+  return res.status(500).json({ success: false, message: 'Internal server error' });
+});
 
-// ===================================================
-// 9) UTILITY: Format date in WAT (UTC+1, Africa/Lagos)
-// ===================================================
-function formatDateWAT(date) {
-  return new Date(date).toLocaleString('en-NG', {
-    timeZone:     'Africa/Lagos',
-    day:          '2-digit',
-    month:        '2-digit',
-    year:         'numeric',
-    hour:         '2-digit',
-    minute:       '2-digit',
-    second:       '2-digit',
-    hour12:       false
-  });
-}
-
-// ===================================================
-// 10) UTILITY: Convert relative image URLs to absolute
-// ===================================================
-function resolveImageUrl(imagePath) {
-  if (!imagePath) return '';
-
-  // Already absolute URL or a data/blob URL
-  if (
-    imagePath.startsWith('http://') ||
-    imagePath.startsWith('https://') ||
-    imagePath.startsWith('data:') ||
-    imagePath.startsWith('blob:')
-  ) {
-    return imagePath;
-  }
-
-  // Email clients require PUBLICLY ACCESSIBLE https image URLs.
-  // If you store images as relative paths (e.g. "/images/p1.jpg"), we convert them
-  // to absolute URLs using PUBLIC_BASE_URL.
-  // Example: PUBLIC_BASE_URL=https://fortunehub.name.ng
-  const PUBLIC_BASE = process.env.PUBLIC_BASE_URL || 'https://fortunehub.name.ng';
-  const baseUrl = PUBLIC_BASE.endsWith('/') ? PUBLIC_BASE : PUBLIC_BASE + '/';
-
-  // Remove leading slash so URL(base, path) works consistently
-  const cleanPath = imagePath.startsWith('/') ? imagePath.slice(1) : imagePath;
-
-  // Use URL() to safely build/encode the final URL
-  try {
-    return new URL(cleanPath, baseUrl).toString();
-  } catch (_) {
-    return baseUrl + cleanPath;
-  }
-}
-
-// ===================================================
-// 11) EMAIL SENDER — SEND BOTH CUSTOMER & OWNER EMAILS
-// ===================================================
-async function sendPaymentEmails({ toEmail, reference, amountNaira, currency, paidAt, metadata }) {
-  if (!toEmail) throw new Error('Missing customer email');
-  if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY is missing (cannot send email)');
-
-  // --- Extract metadata fields (with safe fallbacks) ---
-  const customerName   = metadata?.customer_name   || metadata?.custom_fields?.[0]?.value || 'Customer';
-  const customerPhone  = metadata?.customer_phone  || '';
-  const rawCartItems   = Array.isArray(metadata?.cart_items) ? metadata.cart_items : [];
-  const shippingFee    = Number(metadata?.shipping_fee  || 0);   // naira
-
-  // ✅ FIX: Enrich cart items with product images from DB.
-  // During checkout, base64 images are intentionally stripped from cart metadata
-  // to avoid Paystack's ~5KB metadata limit. Here we restore them from MongoDB
-  // so the order confirmation email can show product images.
-  const cartItems = await Promise.all(rawCartItems.map(async (item) => {
-    if (!item.image && item.id) {
-      try {
-        // ✅ FIX: Strip the "db_" prefix that the frontend attaches to MongoDB _ids.
-        // The API returns id as "db_<mongoId>" (e.g. "db_507f1f77bcf86cd799439011").
-        // The raw mongoId (24-char hex) is what Product.findById() expects.
-        const rawId  = String(item.id);
-        const prodId = rawId.startsWith('db_') ? rawId.slice(3) : rawId;
-        let prod = null;
-        if (prodId.match(/^[a-f0-9]{24}$/i)) {
-          prod = await Product.findById(prodId).select('image images').lean();
-        }
-        if (!prod) {
-          // fallback: search by the virtual "id" field (for products.json items)
-          prod = await Product.findOne({ _id: prodId }).select('image images').lean()
-                 || await Product.findOne({ name: item.name }).select('image images').lean();
-        }
-        if (prod) {
-          const img = (Array.isArray(prod.images) && prod.images[0]) || prod.image || '';
-          return { ...item, image: img };
-        }
-      } catch(e) {
-        console.warn('⚠️ Could not enrich cart item image for id', item.id, ':', e.message);
-      }
-    }
-    return item;
-  }));
-  const shippingState  = metadata?.shipping_state  || '';
-
-  // --- Subtotal from cart items (prices stored in NAIRA in the frontend cart) ---
-  // NOTE: Frontend stores prices in Naira. Do NOT divide by 100.
-  const subtotalNaira = cartItems.reduce((sum, item) => sum + Number(item.price || 0) * (Number(item.quantity) || 1), 0);
-
-  // --- If shipping_fee not in metadata, derive from total - subtotal ---
-  const derivedShippingFee = shippingFee > 0
-    ? shippingFee
-    : (cartItems.length > 0 ? Math.max(0, amountNaira - subtotalNaira) : 0);
-
-  // --- Final subtotal to show: if cart available use it, else total - shipping ---
-  const displaySubtotal = cartItems.length > 0 ? subtotalNaira : (amountNaira - derivedShippingFee);
-
-  // --- Date formatted in WAT (Nigerian time, UTC+1) ---
-  const dateFormatted = formatDateWAT(paidAt || new Date());
-  const yearNow       = new Date().getFullYear();
-
-  // --- Build items table rows with product images ---
-  // IMPORTANT:
-  // - Most email clients block `data:image/...` URLs.
-  // - If product images are stored as base64 (data URLs), we embed them as inline
-  //   CID attachments via Resend, so they can render inside the email.
-  // Docs: https://resend.com/docs/dashboard/emails/embed-inline-images
-  const inlineAttachments = [];
-
-  function dataUrlToCidAttachment(dataUrl, contentId, fallbackExt = 'png') {
-    const m = String(dataUrl || '').match(/^data:([^;]+);base64,(.+)$/);
-    if (!m) return null;
-    const mime = m[1] || 'image/png';
-    const base64 = m[2] || '';
-
-    // Safety: avoid huge emails
-    // (Resend max email size is 40MB including base64 attachments)
-    const approxBytes = Math.floor((base64.length * 3) / 4);
-    if (approxBytes > 2_500_000) return null; // ~2.5MB per image cap
-
-    const ext = (mime.split('/')[1] || fallbackExt).replace(/[^a-z0-9]/gi, '') || fallbackExt;
-
-    return {
-      filename: `product-${contentId}.${ext}`,
-      content: base64,
-      content_id: contentId  // ✅ FIX: Resend API requires snake_case 'content_id' for inline CID images.
-                              // Using camelCase 'contentId' caused the image to be sent as a regular file
-                              // attachment instead of an inline image, making it appear at the bottom
-                              // of the email and NOT render inside the product table.
-    };
-  }
-
-  const itemsHTML = cartItems.length > 0
-    ? cartItems.map((item, idx) => {
-        const itemPrice = Number(item.price || 0);  // already in Naira
-        const qty       = Number(item.quantity || 1);
-        const lineTotal = itemPrice * qty;
-
-        const rawImagePath = String(item.image || '');
-        const isDataUrl = rawImagePath.startsWith('data:');
-
-        let imgHtml = '';
-
-        if (isDataUrl) {
-          const contentId = `prodimg-${idx + 1}`;
-          const attachment = dataUrlToCidAttachment(rawImagePath, contentId);
-          if (attachment) {
-            inlineAttachments.push(attachment);
-            imgHtml = `<img src="cid:${contentId}" alt="${item.name || 'Product'}"
-                    style="width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid #e8e8e8;" />`;
-          }
-        }
-
-        // If not data-url (or attachment was too big), use normal public URL.
-        if (!imgHtml) {
-          const absoluteImageUrl = resolveImageUrl(rawImagePath);
-          imgHtml = absoluteImageUrl
-            ? `<img src="${absoluteImageUrl}" alt="${item.name || 'Product'}"
-                    style="width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid #e8e8e8;" />`
-            : '<div style="width:60px;height:60px;background:#f5f0ff;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#8b5cf6;border:1px solid #e8e8e8;">🛍️</div>';
-        }
-
-        return `
-          <tr>
-            <td style="padding:10px 8px;border-bottom:1px solid #f0f0f0;vertical-align:middle;">${imgHtml}</td>
-            <td style="padding:10px 8px;border-bottom:1px solid #f0f0f0;vertical-align:middle;font-size:14px;color:#333;">
-              ${item.name || 'Item'}
-            </td>
-            <td style="padding:10px 8px;border-bottom:1px solid #f0f0f0;vertical-align:middle;text-align:center;font-size:14px;color:#333;">
-              ${qty}
-            </td>
-            <td style="padding:10px 8px;border-bottom:1px solid #f0f0f0;vertical-align:middle;text-align:right;font-size:14px;font-weight:700;color:#333;">
-              ${formatNaira(lineTotal)}
-            </td>
-          </tr>
-        `;
-      }).join('')
-    : `
-        <tr>
-          <td colspan="4" style="padding:14px 8px;text-align:center;color:#888;font-size:13px;">
-            Order items not available
-          </td>
-        </tr>
-      `;
-
-  // --- Shipping row label ---
-  const shippingLabel = shippingState
-    ? `Shipping Fee (${shippingState})`
-    : 'Shipping Fee';
-
-  // ========================================
-  // CUSTOMER EMAIL (Existing template)
-  // ========================================
-  const customerEmailHTML = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Order Confirmed – FortuneHub</title>
-  <!--[if mso]>
-  <style>table{border-collapse:collapse;}td,th{mso-line-height-rule:exactly;}</style>
-  <![endif]-->
-  <style>
-    /* ── Reset ── */
-    * { box-sizing: border-box; }
-    body, table, td, p, a, li, blockquote {
-      -webkit-text-size-adjust: 100%;
-      -ms-text-size-adjust: 100%;
-    }
-    body  { margin:0; padding:0; background:#f0f2f5; font-family: 'Segoe UI', Arial, sans-serif; }
-    table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
-    img   { border:0; outline:none; text-decoration:none; display:block; max-width:100%; }
-    a     { color: #4f46e5; text-decoration: none; }
-
-    /* ── Wrapper ── */
-    .email-wrapper  { width:100%; max-width:620px; margin:0 auto; }
-    .email-body     { background:#ffffff; border-radius:12px; overflow:hidden;
-                      box-shadow: 0 4px 24px rgba(0,0,0,0.10); }
-
-    /* ── Header ── */
-    .header {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      padding: 36px 24px 28px;
-      text-align: center;
-    }
-    .header .checkmark { font-size: 40px; line-height:1; margin-bottom:10px; }
-    .header h1 {
-      margin: 0; padding: 0;
-      color: #ffffff;
-      font-size: 26px;
-      font-weight: 800;
-      letter-spacing: -0.5px;
-    }
-    .header p  {
-      margin: 8px 0 0; padding: 0;
-      color: rgba(255,255,255,0.88);
-      font-size: 14px;
-    }
-
-    /* ── Content ── */
-    .content { padding: 28px 28px 8px; }
-    .greeting { font-size:16px; color:#1f2937; margin:0 0 6px; font-weight:600; }
-    .intro    { font-size:14px; color:#6b7280; margin:0 0 22px; line-height:1.6; }
-
-    /* ── Reference Box ── */
-    .ref-box {
-      background: linear-gradient(135deg, #f8faff 0%, #fef3ff 100%);
-      border: 1px solid #e0e7ff;
-      border-left: 4px solid #667eea;
-      border-radius: 8px;
-      padding: 14px 16px;
-      margin-bottom: 22px;
-    }
-    .ref-box table { width:100%; }
-    .ref-box td   { font-size:13px; padding:3px 0; color:#374151; }
-    .ref-box .lbl { font-weight:700; color:#4b5563; width:130px; }
-
-    /* ── Section heading ── */
-    .section-title {
-      font-size: 15px;
-      font-weight: 700;
-      color: #1f2937;
-      margin: 0 0 10px;
-      padding-bottom: 6px;
-      border-bottom: 2px solid #f0f0f0;
-      display:flex;
-      align-items:center;
-      gap:6px;
-    }
-
-    /* ── Items Table ── */
-    .items-table { width:100%; border-collapse:collapse; margin-bottom:0; }
-    .items-table thead tr { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
-    .items-table thead th {
-      padding: 10px 8px;
-      color: #fff;
-      font-size: 12px;
-      font-weight: 600;
-      text-align: left;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .items-table thead th:nth-child(3) { text-align:center; }
-    .items-table thead th:nth-child(4) { text-align:right;  }
-    .items-table tbody tr:nth-child(even) td { background:#fafafa; }
-
-    /* ── Totals ── */
-    .totals-box {
-      background: linear-gradient(135deg, #f8faff 0%, #fef3ff 100%);
-      border: 1px solid #e9d5ff;
-      border-radius: 8px;
-      padding: 14px 16px;
-      margin: 14px 0 22px;
-    }
-    .totals-box table { width:100%; }
-    .totals-box td    { font-size:14px; padding:4px 0; color:#374151; }
-    .totals-box .lbl  { font-weight:500; }
-    .totals-box .val  { text-align:right; font-weight:600; }
-    .total-row td     { font-size:17px !important; font-weight:800 !important;
-                        color:#667eea !important; padding-top:10px !important;
-                        border-top:2px solid #e9d5ff; }
-
-    /* ── What's Next ── */
-    .next-box {
-      background: linear-gradient(135deg, #fef3ff 0%, #faf5ff 100%);
-      border: 1px solid #e9d5ff;
-      border-radius: 8px;
-      padding: 14px 16px;
-      margin-bottom: 24px;
-    }
-    .next-box p {
-      margin: 0; font-size: 14px; color: #6b21a8; line-height: 1.6;
-    }
-    .next-box strong { color: #7c3aed; }
-
-    /* ── Footer ── */
-    .footer {
-      background: linear-gradient(135deg, #f8faff 0%, #faf5ff 100%);
-      border-top: 1px solid #e9d5ff;
-      padding: 18px 24px;
-      text-align: center;
-    }
-    .footer p  { margin:3px 0; font-size:12px; color:#9ca3af; }
-    .footer .brand { font-size:13px; font-weight:700; color:#6b7280; }
-
-    /* ── Responsive ── */
-    @media only screen and (max-width: 480px) {
-      .content     { padding: 20px 16px 8px !important; }
-      .header      { padding: 28px 16px 22px !important; }
-      .header h1   { font-size: 22px !important; }
-      .items-table thead th,
-      .items-table tbody td { font-size: 12px !important; padding: 8px 5px !important; }
-      .items-table thead th:first-child { display:none; }
-      .items-table tbody td:first-child { display:none; }
-    }
-  </style>
-</head>
-<body>
-  <table width="100%" cellpadding="0" cellspacing="0" border="0"
-         style="background:#f0f2f5; padding: 24px 12px;">
-    <tr>
-      <td align="center">
-        <table class="email-wrapper" cellpadding="0" cellspacing="0" border="0"
-               style="width:100%;max-width:620px;">
-          <tr>
-            <td>
-              <div class="email-body">
-
-                <!-- ══════════ HEADER ══════════ -->
-                <table width="100%" cellpadding="0" cellspacing="0" border="0"
-                       style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);background-color:#667eea;">
-                  <tr>
-                    <td align="center" style="padding:36px 24px 28px;text-align:center;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);background-color:#667eea;">
-                      <!--[if mso]><table><tr><td style="background:#667eea;padding:36px 24px 28px;text-align:center;"><![endif]-->
-                      <div style="font-size:40px;line-height:1;margin-bottom:10px;">✅</div>
-                      <h1 style="margin:0;padding:0;color:#ffffff;font-size:26px;font-weight:800;letter-spacing:-0.5px;font-family:'Segoe UI',Arial,sans-serif;">Order Confirmed!</h1>
-                      <p style="margin:8px 0 0;padding:0;color:rgba(255,255,255,0.88);font-size:14px;font-family:'Segoe UI',Arial,sans-serif;">Thank you for shopping with <strong style="color:#ffffff;">FortuneHub</strong></p>
-                      <!--[if mso]></td></tr></table><![endif]-->
-                    </td>
-                  </tr>
-                </table>
-
-                <!-- ══════════ BODY ══════════ -->
-                <div style="padding:28px 28px 8px;">
-                  <p style="font-size:16px;color:#1f2937;margin:0 0 6px;font-weight:600;font-family:'Segoe UI',Arial,sans-serif;">Hi ${customerName},</p>
-                  <p style="font-size:14px;color:#6b7280;margin:0 0 22px;line-height:1.6;font-family:'Segoe UI',Arial,sans-serif;">
-                    Thank you for your purchase! Your payment was successful
-                    and your order is being processed.
-                    ${customerPhone ? `<br>We'll keep you updated on <strong>${customerPhone}</strong>.` : ''}
-                  </p>
-
-                  <!-- Reference Block -->
-                  <div style="background:#f8faff;background:linear-gradient(135deg,#f8faff 0%,#fef3ff 100%);border:1px solid #e0e7ff;border-left:4px solid #667eea;border-radius:8px;padding:14px 16px;margin-bottom:22px;">
-                    <table>
-                      <tr>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Order Reference:</td>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;"><strong>${reference}</strong></td>
-                      </tr>
-                      <tr>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Date &amp; Time:</td>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;">${dateFormatted}</td>
-                      </tr>
-                      <tr>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Currency:</td>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;">${currency || 'NGN'}</td>
-                      </tr>
-                      <tr>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Status:</td>
-                        <td>
-                          <span style="display:inline-block;background-color:#d1fae5;color:#065f46;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:700;font-family:'Segoe UI',Arial,sans-serif;">✔ CONFIRMED</span>
-                        </td>
-                      </tr>
-                      ${shippingState ? `
-                      <tr>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Delivery State:</td>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;">${shippingState}</td>
-                      </tr>` : ''}
-                    </table>
-                  </div>
-
-                  <!-- ── Items ── -->
-                  <p style="font-size:15px;font-weight:700;color:#1f2937;margin:0 0 10px;padding-bottom:6px;border-bottom:2px solid #f0f0f0;font-family:'Segoe UI',Arial,sans-serif;">🛍️ Your Items</p>
-
-                  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;margin-bottom:0;">
-                    <thead>
-                      <tr style="background-color:#667eea;">
-                        <th style="width:70px;padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:left;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Image</th>
-                        <th style="padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:left;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Product</th>
-                        <th style="width:50px;padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:center;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Qty</th>
-                        <th style="width:110px;padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:right;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Price</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      ${itemsHTML}
-                    </tbody>
-                  </table>
-
-                  <!-- ── Totals ── -->
-                  <div style="background-color:#f8faff;border:1px solid #e9d5ff;border-radius:8px;padding:14px 16px;margin:14px 0 22px;">
-                    <table>
-                      ${cartItems.length > 0 ? `
-                      <tr>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">Subtotal:</td>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">${formatNaira(displaySubtotal)}</td>
-                      </tr>
-                      <tr>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">${shippingLabel}:</td>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">${formatNaira(derivedShippingFee)}</td>
-                      </tr>` : ''}
-                      <tr>
-                        <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">TOTAL PAID:</td>
-                        <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;text-align:right;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">${formatNaira(amountNaira)}</td>
-                      </tr>
-                    </table>
-                  </div>
-
-                  <!-- ── What's Next ── -->
-                  <div style="background-color:#faf5ff;border:1px solid #e9d5ff;border-radius:8px;padding:14px 16px;margin-bottom:24px;">
-                    <p>
-                      <strong style="color:#7c3aed;font-family:'Segoe UI',Arial,sans-serif;">📦 What's Next?</strong><br>
-                      <span style="font-size:14px;color:#6b21a8;line-height:1.6;font-family:'Segoe UI',Arial,sans-serif;">Your order will be processed and shipped soon. We'll send you a tracking number once it's dispatched.</span>
-                    </p>
-                  </div>
-
-                </div><!-- /.content-end -->
-
-                <!-- ══════════ FOOTER ══════════ -->
-                <div style="background-color:#f8faff;border-top:1px solid #e9d5ff;padding:18px 24px;text-align:center;">
-                  <p style="margin:3px 0;font-size:12px;color:#9ca3af;font-family:'Segoe UI',Arial,sans-serif;">Need help? Reply to this email${OWNER_EMAIL ? ` or contact us at <a href="mailto:${OWNER_EMAIL}">${OWNER_EMAIL}</a>` : ''}.</p>
-                  <p style="margin:3px 0;font-size:12px;color:#9ca3af;font-family:'Segoe UI',Arial,sans-serif;">Order Reference: <strong>${reference}</strong></p>
-                  <p style="margin:3px 0;font-size:13px;font-weight:700;color:#6b7280;font-family:'Segoe UI',Arial,sans-serif;">© ${yearNow} FortuneHub. All rights reserved.</p>
-                </div>
-
-              </div><!-- /.email-body-end -->
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-  `;
-
-  // ========================================
-  // OWNER EMAIL (New template with action buttons)
-  // ========================================
-  const whatsappNumber = customerPhone.replace(/\D/g, ''); // Remove non-digits
-  const whatsappLink = `https://wa.me/234${whatsappNumber.substring(1)}?text=Hi%20${encodeURIComponent(customerName)},%20regarding%20your%20FortuneHub%20order%20${reference}`;
-  const emailLink = `mailto:${toEmail}?subject=Your%20FortuneHub%20Order%20${reference}`;
-
-  const ownerEmailHTML = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>New Order Received – FortuneHub</title>
-  <style>
-    * { box-sizing: border-box; }
-    body, table, td, p, a, li, blockquote {
-      -webkit-text-size-adjust: 100%;
-      -ms-text-size-adjust: 100%;
-    }
-    body  { margin:0; padding:0; background:#f0f2f5; font-family: 'Segoe UI', Arial, sans-serif; }
-    table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
-    img   { border:0; outline:none; text-decoration:none; display:block; max-width:100%; }
-    a     { color: #4f46e5; text-decoration: none; }
-
-    .email-wrapper  { width:100%; max-width:620px; margin:0 auto; }
-    .email-body     { background:#ffffff; border-radius:12px; overflow:hidden;
-                      box-shadow: 0 4px 24px rgba(0,0,0,0.10); }
-
-    .header {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      padding: 36px 24px 28px;
-      text-align: center;
-    }
-    .header .icon { font-size: 40px; line-height:1; margin-bottom:10px; }
-    .header h1 {
-      margin: 0; padding: 0;
-      color: #ffffff;
-      font-size: 26px;
-      font-weight: 800;
-      letter-spacing: -0.5px;
-    }
-    .header p  {
-      margin: 8px 0 0; padding: 0;
-      color: rgba(255,255,255,0.88);
-      font-size: 14px;
-    }
-
-    .content { padding: 28px 28px 8px; }
-    .greeting { font-size:16px; color:#1f2937; margin:0 0 6px; font-weight:600; }
-    .intro    { font-size:14px; color:#6b7280; margin:0 0 22px; line-height:1.6; }
-
-    .info-box {
-      background: linear-gradient(135deg, #f8faff 0%, #fef3ff 100%);
-      border: 1px solid #e0e7ff;
-      border-left: 4px solid #667eea;
-      border-radius: 8px;
-      padding: 14px 16px;
-      margin-bottom: 22px;
-    }
-    .info-box table { width:100%; }
-    .info-box td   { font-size:13px; padding:3px 0; color:#374151; }
-    .info-box .lbl { font-weight:700; color:#4b5563; width:130px; }
-
-    .section-title {
-      font-size: 15px;
-      font-weight: 700;
-      color: #1f2937;
-      margin: 22px 0 10px;
-      padding-bottom: 6px;
-      border-bottom: 2px solid #f0f0f0;
-    }
-
-    .items-table { width:100%; border-collapse:collapse; margin-bottom:0; }
-    .items-table thead tr { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
-    .items-table thead th {
-      padding: 10px 8px;
-      color: #fff;
-      font-size: 12px;
-      font-weight: 600;
-      text-align: left;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .items-table thead th:nth-child(3) { text-align:center; }
-    .items-table thead th:nth-child(4) { text-align:right;  }
-    .items-table tbody tr:nth-child(even) td { background:#fafafa; }
-
-    .totals-box {
-      background: linear-gradient(135deg, #f8faff 0%, #fef3ff 100%);
-      border: 1px solid #e9d5ff;
-      border-radius: 8px;
-      padding: 14px 16px;
-      margin: 14px 0 22px;
-    }
-    .totals-box table { width:100%; }
-    .totals-box td    { font-size:14px; padding:4px 0; color:#374151; }
-    .totals-box .lbl  { font-weight:500; }
-    .totals-box .val  { text-align:right; font-weight:600; }
-    .total-row td     { font-size:17px !important; font-weight:800 !important;
-                        color:#667eea !important; padding-top:10px !important;
-                        border-top:2px solid #e9d5ff; }
-
-    .action-box {
-      background: linear-gradient(135deg, #fff5f5 0%, #fef3f3 100%);
-      border: 2px solid #fca5a5;
-      border-radius: 8px;
-      padding: 20px;
-      margin: 22px 0;
-      text-align: center;
-    }
-    .action-box h3 {
-      margin: 0 0 12px;
-      font-size: 16px;
-      color: #991b1b;
-    }
-    .action-box p {
-      margin: 0 0 16px;
-      font-size: 13px;
-      color: #7f1d1d;
-      line-height: 1.5;
-    }
-    .action-buttons {
-      display: flex;
-      gap: 12px;
-      justify-content: center;
-      flex-wrap: wrap;
-    }
-    .btn {
-      display: inline-block;
-      padding: 12px 24px;
-      border-radius: 8px;
-      font-size: 14px;
-      font-weight: 600;
-      text-decoration: none;
-      transition: all 0.3s;
-    }
-    .btn-whatsapp {
-      background: #25D366;
-      color: #ffffff !important;
-    }
-    .btn-whatsapp:hover {
-      background: #128C7E;
-    }
-    .btn-email {
-      background: #667eea;
-      color: #ffffff !important;
-    }
-    .btn-email:hover {
-      background: #5568d3;
-    }
-
-    .footer {
-      background: linear-gradient(135deg, #f8faff 0%, #faf5ff 100%);
-      border-top: 1px solid #e9d5ff;
-      padding: 18px 24px;
-      text-align: center;
-    }
-    .footer p  { margin:3px 0; font-size:12px; color:#9ca3af; }
-    .footer .brand { font-size:13px; font-weight:700; color:#6b7280; }
-
-    @media only screen and (max-width: 480px) {
-      .content     { padding: 20px 16px 8px !important; }
-      .header      { padding: 28px 16px 22px !important; }
-      .header h1   { font-size: 22px !important; }
-      .items-table thead th,
-      .items-table tbody td { font-size: 12px !important; padding: 8px 5px !important; }
-      .items-table thead th:first-child { display:none; }
-      .items-table tbody td:first-child { display:none; }
-      .action-buttons {
-        flex-direction: column;
-      }
-      .btn {
-        width: 100%;
-      }
-    }
-  </style>
-</head>
-<body>
-  <table width="100%" cellpadding="0" cellspacing="0" border="0"
-         style="background:#f0f2f5; padding: 24px 12px;">
-    <tr>
-      <td align="center">
-        <table class="email-wrapper" cellpadding="0" cellspacing="0" border="0">
-          <tr>
-            <td>
-              <div class="email-body">
-
-                <!-- HEADER -->
-                <div class="header">
-                  <div class="icon">🔔</div>
-                  <h1>New Order Received!</h1>
-                  <p>You have a new customer order to process</p>
-                </div>
-
-                <!-- BODY -->
-                <div style="padding:28px 28px 8px;">
-                  <p class="greeting">Hello Admin,</p>
-                  <p style="font-size:14px;color:#6b7280;margin:0 0 22px;line-height:1.6;font-family:'Segoe UI',Arial,sans-serif;">
-                    A new order has been placed on FortuneHub. Please review the details below and contact the customer to arrange delivery.
-                  </p>
-
-                  <!-- Customer Information -->
-                  <div class="section-title">👤 Customer Information</div>
-                  <div class="info-box">
-                    <table>
-                      <tr>
-                        <td class="lbl">Name:</td>
-                        <td><strong>${customerName}</strong></td>
-                      </tr>
-                      <tr>
-                        <td class="lbl">Email:</td>
-                        <td><a href="mailto:${toEmail}">${toEmail}</a></td>
-                      </tr>
-                      <tr>
-                        <td class="lbl">Phone:</td>
-                        <td><strong>${customerPhone}</strong></td>
-                      </tr>
-                      ${shippingState ? `
-                      <tr>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Delivery State:</td>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;">${shippingState}</td>
-                      </tr>` : ''}
-                    </table>
-                  </div>
-
-                  <!-- Order Details -->
-                  <div class="section-title">📋 Order Details</div>
-                  <div class="info-box">
-                    <table>
-                      <tr>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Order Reference:</td>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;"><strong>${reference}</strong></td>
-                      </tr>
-                      <tr>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Date &amp; Time:</td>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;">${dateFormatted}</td>
-                      </tr>
-                      <tr>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Currency:</td>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-family:'Segoe UI',Arial,sans-serif;">${currency || 'NGN'}</td>
-                      </tr>
-                      <tr>
-                        <td style="font-size:13px;padding:3px 0;color:#374151;font-weight:700;color:#4b5563;width:130px;font-family:'Segoe UI',Arial,sans-serif;">Status:</td>
-                        <td>
-                          <span style="display:inline-block;background:#d1fae5;color:#065f46;
-                                       padding:2px 10px;border-radius:20px;font-size:12px;
-                                       font-weight:700;">
-                            ✔ PAID
-                          </span>
-                        </td>
-                      </tr>
-                    </table>
-                  </div>
-
-                  <!-- Items Ordered -->
-                  <div class="section-title">🛍️ Items Ordered</div>
-                  <table class="items-table">
-                    <thead>
-                      <tr style="background-color:#667eea;">
-                        <th style="width:70px;padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:left;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Image</th>
-                        <th style="padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:left;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Product</th>
-                        <th style="width:50px;padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:center;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Qty</th>
-                        <th style="width:110px;padding:10px 8px;color:#fff;font-size:12px;font-weight:600;text-align:right;text-transform:uppercase;letter-spacing:0.5px;background-color:#667eea;font-family:'Segoe UI',Arial,sans-serif;">Price</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      ${itemsHTML}
-                    </tbody>
-                  </table>
-
-                  <!-- Order Totals -->
-                  <div style="background-color:#f8faff;border:1px solid #e9d5ff;border-radius:8px;padding:14px 16px;margin:14px 0 22px;">
-                    <table>
-                      ${cartItems.length > 0 ? `
-                      <tr>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">Subtotal:</td>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">${formatNaira(displaySubtotal)}</td>
-                      </tr>
-                      <tr>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:500;font-family:'Segoe UI',Arial,sans-serif;">${shippingLabel}:</td>
-                        <td style="font-size:14px;padding:4px 0;color:#374151;font-weight:600;text-align:right;font-family:'Segoe UI',Arial,sans-serif;">${formatNaira(derivedShippingFee)}</td>
-                      </tr>` : ''}
-                      <tr>
-                        <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">TOTAL PAID:</td>
-                        <td style="font-size:17px;padding:10px 0 4px;color:#667eea;font-weight:800;text-align:right;border-top:2px solid #e9d5ff;font-family:'Segoe UI',Arial,sans-serif;">${formatNaira(amountNaira)}</td>
-                      </tr>
-                    </table>
-                  </div>
-
-                  <!-- Action Required -->
-                  <div class="action-box">
-                    <h3>⚡ Action Required</h3>
-                    <p>
-                      Contact <strong>${customerName}</strong> to arrange for delivery of the order.
-                      Click the buttons below to reach out via WhatsApp or Email.
-                    </p>
-                    <div class="action-buttons">
-                      <a href="${whatsappLink}" class="btn btn-whatsapp" target="_blank">
-                        💬 WhatsApp Customer
-                      </a>
-                      <a href="${emailLink}" class="btn btn-email">
-                        ✉️ Email Customer
-                      </a>
-                    </div>
-                  </div>
-
-                </div>
-
-                <!-- FOOTER -->
-                <div style="background-color:#f8faff;border-top:1px solid #e9d5ff;padding:18px 24px;text-align:center;">
-                  <p>This is an automated notification from FortuneHub order system.</p>
-                  <p style="margin:3px 0;font-size:12px;color:#9ca3af;font-family:'Segoe UI',Arial,sans-serif;">Order Reference: <strong>${reference}</strong></p>
-                  <p style="margin:3px 0;font-size:13px;font-weight:700;color:#6b7280;font-family:'Segoe UI',Arial,sans-serif;">© ${yearNow} FortuneHub. All rights reserved.</p>
-                </div>
-
-              </div>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-  `;
-
-  // Send customer email
-  const customerEmailResp = await resend.emails.send({
-    from:    MAIL_FROM,
-    to:      [toEmail],
-    subject: '✅ Order Confirmed! - FortuneHub',
-    html:    customerEmailHTML,
-    // If product images were base64, we embedded them as inline CID attachments.
-    ...(inlineAttachments.length ? { attachments: inlineAttachments } : {})
-  });
-
-  console.log('✅ Customer email sent:', customerEmailResp?.id || '(no id)');
-
-  // Send owner email (if owner email is configured)
-  if (OWNER_EMAIL) {
-    try {
-      const ownerEmailResp = await resend.emails.send({
-        from:    MAIL_FROM,
-        to:      [OWNER_EMAIL],
-        subject: `🔔 New Order #${reference} - ${customerName}`,
-        html:    ownerEmailHTML,
-        ...(inlineAttachments.length ? { attachments: inlineAttachments } : {})
-      });
-      console.log('✅ Owner email sent:', ownerEmailResp?.id || '(no id)');
-    } catch (ownerEmailError) {
-      console.error('❌ Owner email failed (but customer email sent):', ownerEmailError?.message || ownerEmailError);
-      // Don't throw - customer email was successful
-    }
-  }
-
-  return customerEmailResp;
-}
-
-// ===================================================
-// 11) KEEP-ALIVE SELF-PING (Render Free Plan)
-// ===================================================
-// ✅ FIX: On Render free plan, the server spins down after 15 minutes of inactivity.
-// This causes the ERR_TIMED_OUT error visible in your PageSpeed screenshots.
-//
-// RECOMMENDED FIX (external, more reliable):
-//   Register your /ping endpoint on a FREE external uptime monitor:
-//   • UptimeRobot: https://uptimerobot.com  (5-min interval, free)
-//   • cron-job.org: https://cron-job.org   (custom interval, free)
-//   Ping URL: https://fortunehub-backend.onrender.com/ping
-//
-// BUILT-IN SELF-PING (backup, every 14 minutes):
-//   The server also pings itself as a backup. Note: Render may detect
-//   self-pings and still spin down, so use an EXTERNAL monitor as primary.
-
-const SELF_PING_INTERVAL_MS = 14 * 60 * 1000; // 14 minutes
-const SELF_PING_URL = `http://localhost:${process.env.PORT || 10000}/ping`;
-
-function startSelfPing() {
-  // Only run self-ping in production (not needed locally)
-  if (process.env.NODE_ENV !== 'production' && !process.env.RENDER) {
-    return;
-  }
-
-  const https_module = require('http'); // use http since we're hitting localhost
-  setInterval(() => {
-    const pingReq = https_module.get(SELF_PING_URL, (res) => {
-      console.log(`🏓 Self-ping: ${res.statusCode} — server is awake (${new Date().toISOString()})`);
-    });
-    pingReq.on('error', (err) => {
-      console.warn('⚠️  Self-ping failed (non-fatal):', err.message);
-    });
-    pingReq.end();
-  }, SELF_PING_INTERVAL_MS);
-
-  console.log(`🏓 Self-ping started (every ${SELF_PING_INTERVAL_MS / 60000} minutes)`);
-  console.log('💡 TIP: Also register https://fortunehub-backend.onrender.com/ping');
-  console.log('💡      on UptimeRobot (https://uptimerobot.com) for more reliable keep-alive.');
-}
-
-// ===================================================
-// 11) START SERVER
-// ===================================================
 app.listen(PORT, () => {
-  console.log('');
-  console.log('🚀 ================================');
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log('🚀 ================================');
-  console.log('📊 Environment:', process.env.NODE_ENV || 'development');
-  console.log('📧 Resend API Key:',  RESEND_API_KEY        ? '✅ Configured' : '❌ Missing');
-  console.log('✉️  MAIL_FROM:',       MAIL_FROM);
-  console.log('📮 Owner Email:',     OWNER_EMAIL           ? `✅ ${OWNER_EMAIL}` : '❌ Missing');
-  console.log('🗄️  MongoDB URI:',     MONGODB_URI           ? '✅ Configured' : '❌ Missing');
-  console.log('🔑 Paystack Public Key:', PAYSTACK_PUBLIC_KEY ? `✅ ${PAYSTACK_PUBLIC_KEY.substring(0, 18)}...` : '⚠️  Missing (set PAYSTACK_PUBLIC_KEY in Render env)');
-  if (PAYSTACK_SECRET_KEY) {
-    if (PAYSTACK_SECRET_KEY.startsWith('pk_')) {
-      console.error('🚨 PAYSTACK_SECRET_KEY looks like a PUBLIC key (starts with pk_)! Use the SECRET key (sk_test_... or sk_live_...)');
-    } else if (PAYSTACK_SECRET_KEY.startsWith('sk_test_')) {
-      console.log('💳 Paystack Secret: ✅ Configured (TEST mode — use pk_test_... in frontend)');
-    } else if (PAYSTACK_SECRET_KEY.startsWith('sk_live_')) {
-      console.log('💳 Paystack Secret: ✅ Configured (LIVE mode — use pk_live_... in frontend)');
-    } else {
-      console.log('💳 Paystack Secret: ✅ Configured');
-    }
-  } else {
-    console.error('💳 Paystack Secret: ❌ MISSING — Set PAYSTACK_SECRET_KEY in your environment variables!');
-  }
-  console.log('👤 Admin Username:',  ADMIN_USERNAME);
-
-  if (MAIL_FROM.includes('@resend.dev') && !process.env.MAIL_FROM) {
-    console.warn('');
-    console.warn('⚠️  ============================================================');
-    console.warn('⚠️  Sender is onboarding@resend.dev (Resend test domain).');
-    console.warn('⚠️  Emails WILL go to SPAM for non-verified recipients.');
-    console.warn('⚠️  Fix: Verify a custom domain in Resend and set MAIL_FROM.');
-    console.warn('⚠️  ============================================================');
-  }
-
-  console.log('🚀 ================================');
-  console.log('');
-
-  // ✅ Start self-ping after server is listening
-  startSelfPing();
+  console.log(`🚀 FortuneHub backend listening on port ${PORT}`);
 });
-
-// Graceful shutdown
-process.on('SIGTERM', () => gracefulExit('SIGTERM'));
-process.on('SIGINT',  () => gracefulExit('SIGINT'));
 
 function gracefulExit(signal) {
-  console.log(`👋 ${signal} signal received: closing HTTP server`);
-  mongoose.connection.close(() => {
-    console.log('💤 MongoDB connection closed');
-    process.exit(0);
-  });
+  console.log(`\n${signal} received. Closing server...`);
+  mongoose.connection.close(false).finally(() => process.exit(0));
 }
+
+process.on('SIGINT', () => gracefulExit('SIGINT'));
+process.on('SIGTERM', () => gracefulExit('SIGTERM'));
