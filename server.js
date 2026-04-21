@@ -39,7 +39,8 @@ const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 const uploadsDir = path.join(__dirname, 'uploads');
 const proofsDir = path.join(uploadsDir, 'proofs');
 const receiptsDir = path.join(uploadsDir, 'receipts');
-for (const dir of [uploadsDir, proofsDir, receiptsDir]) {
+const emailAssetsDir = path.join(uploadsDir, 'email-assets');
+for (const dir of [uploadsDir, proofsDir, receiptsDir, emailAssetsDir]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
@@ -312,10 +313,44 @@ function buildFrontendAssetUrl(assetPath = '') {
   return `${base}/${String(assetPath).replace(/^\//, '')}`;
 }
 
+function materializeEmailAsset(dataUrl = '') {
+  const value = String(dataUrl || '').trim();
+  const match = value.match(/^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\s]+)$/i);
+  if (!match) return '';
+
+  const mimeType = String(match[1] || '').toLowerCase();
+  if (!mimeType.startsWith('image/')) return '';
+
+  const extByMime = {
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+    'image/svg+xml': 'svg'
+  };
+
+  const payload = String(match[2] || '').replace(/\s+/g, '');
+  const fileHash = crypto.createHash('sha1').update(payload).digest('hex');
+  const extension = extByMime[mimeType] || mimeType.split('/')[1] || 'png';
+  const fileName = `${fileHash}.${extension}`;
+  const outputPath = path.join(emailAssetsDir, fileName);
+
+  if (!fs.existsSync(outputPath)) {
+    fs.writeFileSync(outputPath, Buffer.from(payload, 'base64'));
+  }
+
+  return `/uploads/email-assets/${fileName}`;
+}
+
 function resolveDisplayImage(url, req) {
   const value = String(url || '').trim();
   if (!value) return '';
-  if (/^(https?:|data:)/i.test(value)) return value;
+  if (/^https?:/i.test(value)) return value;
+  if (/^data:/i.test(value)) {
+    const materializedPath = materializeEmailAsset(value);
+    return materializedPath ? buildPublicFileUrl(materializedPath, req) : '';
+  }
   if (value.startsWith('/uploads/')) return buildPublicFileUrl(value, req);
   if (value.startsWith('/')) return buildFrontendAssetUrl(value);
   return buildFrontendAssetUrl(value);
@@ -538,6 +573,9 @@ function buildOrderSummaryCard(order, tone = 'amber') {
   const palette = tone === 'green'
     ? { bg: '#ecfdf5', border: '#a7f3d0' }
     : { bg: '#fffaf0', border: '#fde68a' };
+  const transactionHtml = order.transactionId
+    ? `<div><strong>Txn ID / Narration:</strong> ${order.transactionId}</div>`
+    : '';
   return `<div style="background:${palette.bg};border:1px solid ${palette.border};border-radius:16px;padding:18px;margin-bottom:18px;">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:14px;">
       <div><strong>Customer:</strong> ${order.customerName}</div>
@@ -545,7 +583,7 @@ function buildOrderSummaryCard(order, tone = 'amber') {
       <div><strong>Phone:</strong> ${order.customerPhone}</div>
       <div><strong>Total:</strong> ${formatNaira(order.amount)}</div>
       <div><strong>Shipping:</strong> ${order.shippingState || 'N/A'}</div>
-      <div><strong>Txn ID:</strong> ${order.transactionId || 'Not provided'}</div>
+      ${transactionHtml}
     </div>
   </div>`;
 }
@@ -609,10 +647,11 @@ function buildBuyerReceiptEmail(order, req) {
       <p style="margin:0 0 16px;font-size:15px;line-height:1.7;">Hi <strong>${order.customerName}</strong>, your bank transfer for order <strong>${order.orderRef}</strong> has been verified successfully. Your receipt PDF is attached to this email.</p>
       ${buildOrderSummaryCard(order, 'green')}
       ${buildItemsTable(order, req)}
-      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;background:#f8f9ff;border:1px solid #e5e7eb;border-radius:16px;padding:16px;margin-bottom:18px;">
-        <div><div style="font-size:12px;color:#6b7280;text-transform:uppercase;">Subtotal</div><div style="font-size:18px;font-weight:800;">${formatNaira(order.subtotal)}</div></div>
-        <div><div style="font-size:12px;color:#6b7280;text-transform:uppercase;">Shipping</div><div style="font-size:18px;font-weight:800;">${formatNaira(order.shippingFee)}</div></div>
-        <div><div style="font-size:12px;color:#6b7280;text-transform:uppercase;">Total paid</div><div style="font-size:18px;font-weight:800;color:#10b981;">${formatNaira(order.amount)}</div></div>
+      <div style="display:grid;gap:10px;background:linear-gradient(180deg,#f8f9ff,#ffffff);border:1px solid #dbe4ff;border-radius:18px;padding:18px;margin-bottom:18px;">
+        <div style="font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;font-weight:800;">Payment summary</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;border-radius:14px;background:#ffffff;border:1px solid #e5e7eb;"><span style="font-size:13px;color:#6b7280;text-transform:uppercase;font-weight:800;">Subtotal</span><strong style="font-size:17px;color:#111827;">${formatNaira(order.subtotal)}</strong></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;border-radius:14px;background:#ffffff;border:1px solid #e5e7eb;"><span style="font-size:13px;color:#6b7280;text-transform:uppercase;font-weight:800;">Shipping fee</span><strong style="font-size:17px;color:#111827;">${formatNaira(order.shippingFee)}</strong></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 16px;border-radius:16px;background:linear-gradient(135deg,#10b981,#059669);color:#ffffff;"><span style="font-size:13px;text-transform:uppercase;font-weight:900;letter-spacing:.08em;">Total paid</span><strong style="font-size:20px;color:#ffffff;">${formatNaira(order.amount)}</strong></div>
       </div>
       <a href="${receiptLink}" style="display:inline-block;background:#10b981;color:#fff;text-decoration:none;padding:12px 18px;border-radius:10px;font-weight:700;">Download receipt PDF</a>
       ${timelineHtml(order)}
@@ -646,63 +685,92 @@ async function generateReceiptPdf(order, req) {
     const left = 42;
     const right = pageWidth - 42;
 
-    doc.roundedRect(left, 34, usableWidth, 86, 22).fill('#f8f9ff');
-    doc.fillColor('#111827').fontSize(23).text('FortuneHub Receipt', left, 54, { width: usableWidth, align: 'center' });
-    doc.fillColor('#6b7280').fontSize(11).text(`Order Ref: ${order.orderRef}`, left, 84, { width: usableWidth, align: 'center' });
-    doc.text(`Issued: ${formatDateWAT(order.verifiedAt || new Date())}`, left, 100, { width: usableWidth, align: 'center' });
+    const optionalDetailRows = order.transactionId
+      ? [['Transaction ID / Narration', order.transactionId]]
+      : [];
 
-    let y = 142;
-    doc.fillColor('#111827').fontSize(12).text('Customer details', left, y);
-    y += 20;
+    doc.save();
+    doc.roundedRect(left, 30, usableWidth, 104, 24).fill('#1d4ed8');
+    doc.rect(left + usableWidth - 176, 30, 176, 104).fill('#dc2626');
+    doc.rect(left, 30, 132, 104).fill('#f59e0b');
+    doc.restore();
+
+    doc.roundedRect(left + 12, 42, usableWidth - 24, 80, 20).fillOpacity(0.14).fill('#ffffff');
+    doc.fillOpacity(1);
+    doc.fillColor('#ffffff').fontSize(11).font('Helvetica-Bold').text('OFFICIAL PAYMENT RECEIPT', left, 52, { width: usableWidth, align: 'center' });
+    doc.fontSize(24).text('FortuneHub', left, 68, { width: usableWidth, align: 'center' });
+    doc.font('Helvetica').fontSize(10.5).text(`Order Ref: ${order.orderRef}`, left, 96, { width: usableWidth, align: 'center' });
+    doc.text(`Issued: ${formatDateWAT(order.verifiedAt || new Date())}`, left, 110, { width: usableWidth, align: 'center' });
+
+    let y = 154;
+    doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Customer details', left, y);
+    y += 16;
+
     const detailRows = [
       ['Name', order.customerName],
       ['Email', order.email],
       ['Phone', order.customerPhone],
       ['Shipping state', order.shippingState || 'N/A'],
       ['Payment method', `Bank transfer (${OPAY_BANK_NAME})`],
-      ['Transaction ID', order.transactionId || 'Not provided']
+      ...optionalDetailRows
     ];
-    detailRows.forEach(([label, value], index) => {
-      const rowY = y + (index * 18);
-      doc.fillColor('#6b7280').fontSize(10).text(`${label}:`, left, rowY, { width: 110 });
-      doc.fillColor('#111827').fontSize(10.5).text(String(value || '—'), left + 112, rowY, { width: usableWidth - 112 });
+
+    detailRows.forEach(([label, value]) => {
+      doc.roundedRect(left, y, usableWidth, 24, 8).fill('#f8fafc');
+      doc.fillColor('#6b7280').font('Helvetica-Bold').fontSize(9.5).text(label.toUpperCase(), left + 12, y + 8, { width: 150 });
+      doc.fillColor('#111827').font('Helvetica').fontSize(10.5).text(String(value || '—'), left + 165, y + 7, { width: usableWidth - 177, align: 'left' });
+      y += 30;
     });
 
-    y += (detailRows.length * 18) + 18;
-    doc.fillColor('#111827').fontSize(12).text('Items purchased', left, y);
-    y += 20;
+    y += 6;
+    doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Items purchased', left, y);
+    y += 18;
 
     doc.roundedRect(left, y, usableWidth, 28, 10).fill('#eef2ff');
-    doc.fillColor('#4b5563').fontSize(10).text('Item', left + 12, y + 9, { width: 260 });
-    doc.text('Qty', left + 288, y + 9, { width: 60, align: 'center' });
-    doc.text('Amount', right - 120, y + 9, { width: 100, align: 'right' });
+    doc.fillColor('#374151').font('Helvetica-Bold').fontSize(10).text('Item', left + 14, y + 9, { width: 290 });
+    doc.text('Qty', left + 312, y + 9, { width: 46, align: 'center' });
+    doc.text('Amount', right - 116, y + 9, { width: 96, align: 'right' });
     y += 38;
 
-    (order.items || []).forEach((item) => {
+    (order.items || []).forEach((item, index) => {
       const itemName = String(item.name || 'Item');
       const quantity = String(item.quantity || 1);
       const amount = formatNaira(Number(item.price || 0) * Number(item.quantity || 1));
-      const nameHeight = doc.heightOfString(itemName, { width: 260, align: 'left' });
-      const rowHeight = Math.max(22, nameHeight + 8);
+      const nameHeight = doc.heightOfString(itemName, { width: 290, align: 'left' });
+      const rowHeight = Math.max(24, nameHeight + 8);
 
-      doc.strokeColor('#e5e7eb').moveTo(left, y - 6).lineTo(right, y - 6).stroke();
-      doc.fillColor('#111827').fontSize(10.5).text(itemName, left + 12, y, { width: 260 });
-      doc.fillColor('#374151').text(quantity, left + 288, y, { width: 60, align: 'center' });
-      doc.fillColor('#111827').text(amount, right - 120, y, { width: 100, align: 'right' });
-      y += rowHeight;
+      if (index % 2 === 0) {
+        doc.roundedRect(left, y - 4, usableWidth, rowHeight + 8, 8).fill('#fcfcff');
+      }
+      doc.fillColor('#111827').font('Helvetica').fontSize(10.5).text(itemName, left + 14, y, { width: 290 });
+      doc.fillColor('#374151').text(quantity, left + 312, y, { width: 46, align: 'center' });
+      doc.fillColor('#111827').font('Helvetica-Bold').text(amount, right - 116, y, { width: 96, align: 'right' });
+      y += rowHeight + 8;
     });
 
-    y += 8;
-    doc.strokeColor('#d1d5db').moveTo(left, y).lineTo(right, y).stroke();
-    y += 14;
-    doc.fillColor('#4b5563').fontSize(10.5).text(`Subtotal: ${formatNaira(order.subtotal)}`, right - 180, y, { width: 160, align: 'right' });
-    y += 18;
-    doc.text(`Shipping: ${formatNaira(order.shippingFee)}`, right - 180, y, { width: 160, align: 'right' });
-    y += 20;
-    doc.fillColor('#059669').fontSize(13).text(`Total Paid: ${formatNaira(order.amount)}`, right - 180, y, { width: 160, align: 'right' });
+    y += 6;
+    const summaryWidth = 214;
+    const summaryLeft = right - summaryWidth;
+    doc.roundedRect(summaryLeft, y, summaryWidth, 118, 18).fill('#f8fafc');
+    doc.fillColor('#4b5563').font('Helvetica-Bold').fontSize(10).text('PAYMENT SUMMARY', summaryLeft + 16, y + 14, { width: summaryWidth - 32 });
 
-    y += 34;
-    doc.fillColor('#6b7280').fontSize(10).text(`Verified by: ${order.verifiedBy || 'Admin'}`, left, y);
+    const drawSummaryRow = (label, value, rowY, emphasize = false) => {
+      if (emphasize) {
+        doc.roundedRect(summaryLeft + 12, rowY - 6, summaryWidth - 24, 36, 12).fill('#10b981');
+        doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(10).text(label.toUpperCase(), summaryLeft + 24, rowY + 7, { width: 88 });
+        doc.fontSize(13).text(value, summaryLeft + 100, rowY + 5, { width: summaryWidth - 124, align: 'right' });
+      } else {
+        doc.fillColor('#6b7280').font('Helvetica-Bold').fontSize(10).text(label.toUpperCase(), summaryLeft + 16, rowY, { width: 90 });
+        doc.fillColor('#111827').font('Helvetica-Bold').fontSize(11.5).text(value, summaryLeft + 98, rowY - 1, { width: summaryWidth - 114, align: 'right' });
+      }
+    };
+
+    drawSummaryRow('Subtotal', formatNaira(order.subtotal), y + 42);
+    drawSummaryRow('Shipping fee', formatNaira(order.shippingFee), y + 64);
+    drawSummaryRow('Total paid', formatNaira(order.amount), y + 90, true);
+
+    y += 142;
+    doc.fillColor('#6b7280').font('Helvetica').fontSize(10).text(`Verified by: ${order.verifiedBy || 'Admin'}`, left, y);
     doc.text('Thank you for shopping with FortuneHub.', left, y + 16);
 
     doc.end();
