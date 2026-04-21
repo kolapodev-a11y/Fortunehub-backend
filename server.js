@@ -232,6 +232,7 @@ const orderSchema = new mongoose.Schema({
   verifiedAt: { type: Date, default: null },
   verifiedBy: { type: String, default: '' },
   receiptPdfUrl: { type: String, default: '' },
+  hiddenFromAdmin: { type: Boolean, default: false },
   statusTimeline: { type: [orderTimelineSchema], default: [] },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
@@ -550,7 +551,8 @@ function timelineHtml(order) {
   const steps = [
     { key: 'pending_payment', label: 'Order created' },
     { key: 'awaiting_verification', label: 'Proof uploaded' },
-    { key: 'paid', label: 'Payment verified' }
+    { key: 'paid', label: 'Payment verified' },
+    { key: 'cancelled', label: 'Order cancelled' }
   ];
   const doneStatuses = new Set((order.statusTimeline || []).map((entry) => entry.status));
   return `<div style="margin:18px 0 0;">
@@ -673,6 +675,35 @@ function buildBuyerReceiptEmail(order, req) {
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 16px;border-radius:16px;background:linear-gradient(135deg,#10b981,#059669);color:#ffffff;"><span style="font-size:13px;text-transform:uppercase;font-weight:900;letter-spacing:.08em;">Total paid</span><strong style="font-size:20px;color:#ffffff;">${formatNaira(order.amount)}</strong></div>
       </div>
       <a href="${receiptLink}" style="display:inline-block;background:#10b981;color:#fff;text-decoration:none;padding:12px 18px;border-radius:10px;font-weight:700;">Download receipt PDF</a>
+      ${timelineHtml(order)}
+    `
+  });
+}
+
+
+function buildBuyerCancelledEmail(order, req) {
+  return emailShell({
+    title: 'Your pending order was cancelled',
+    eyebrow: 'Customer update',
+    accent: '#ef4444',
+    body: `
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;">Hi <strong>${order.customerName}</strong>, your pending bank transfer order <strong>${order.orderRef}</strong> has been cancelled successfully. If you still want these items, you can place a fresh order anytime.</p>
+      ${buildOrderSummaryCard(order, 'amber')}
+      ${buildItemsTable(order, req)}
+      ${timelineHtml(order)}
+    `
+  });
+}
+
+function buildAdminCancelledEmail(order, req) {
+  return emailShell({
+    title: 'Pending order cancelled by buyer',
+    eyebrow: 'Admin notification',
+    accent: '#ef4444',
+    body: `
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.7;">Order <strong>${order.orderRef}</strong> was cancelled by the buyer before payment proof was uploaded. The order has been removed from active admin processing.</p>
+      ${buildOrderSummaryCard(order, 'amber')}
+      ${buildItemsTable(order, req)}
       ${timelineHtml(order)}
     `
   });
@@ -1029,6 +1060,42 @@ app.get('/api/orders/:id', authMiddleware, async (req, res) => {
   return res.json({ success: true, data: serializeOrder(order, req) });
 });
 
+
+app.post('/api/orders/:id/cancel', authMiddleware, async (req, res) => {
+  try {
+    const order = await Order.findOne({ _id: req.params.id, hiddenFromAdmin: { $ne: true } });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (String(order.userId) !== String(req.user.id)) return res.status(403).json({ success: false, message: 'Not authorized to update this order' });
+    if (order.status !== 'pending_payment') {
+      return res.status(400).json({ success: false, message: 'Only pending payment orders can be cancelled' });
+    }
+
+    order.status = 'cancelled';
+    order.hiddenFromAdmin = true;
+    pushTimeline(order, 'cancelled', 'Order cancelled', order.email, 'Buyer cancelled pending payment before admin processing');
+    await order.save();
+
+    await sendEmail({
+      to: order.email,
+      subject: `Your FortuneHub order ${order.orderRef} was cancelled`,
+      html: buildBuyerCancelledEmail(order, req)
+    });
+
+    if (OWNER_EMAIL) {
+      await sendEmail({
+        to: OWNER_EMAIL,
+        subject: `Buyer cancelled pending order ${order.orderRef}`,
+        html: buildAdminCancelledEmail(order, req)
+      });
+    }
+
+    return res.json({ success: true, message: 'Pending order cancelled successfully', data: serializeOrder(order, req) });
+  } catch (error) {
+    console.error('❌ Cancel order error:', error);
+    return res.status(500).json({ success: false, message: 'Could not cancel order' });
+  }
+});
+
 app.post('/api/orders/:id/proof', authMiddleware, (req, res, next) => {
   uploadProof.single('proof')(req, res, (error) => {
     if (error) return res.status(400).json({ success: false, message: error.message });
@@ -1086,12 +1153,13 @@ app.post('/api/admin/login', async (req, res) => {
 });
 
 app.get('/api/admin/summary', verifyAdmin, async (req, res) => {
+  const visibleFilter = { hiddenFromAdmin: { $ne: true } };
   const [productCount, pendingCount, paidCount, awaitingCount, revenueAgg] = await Promise.all([
     Product.countDocuments(),
-    Order.countDocuments({ status: 'pending_payment' }),
-    Order.countDocuments({ status: 'paid' }),
-    Order.countDocuments({ status: 'awaiting_verification' }),
-    Order.aggregate([{ $match: { status: 'paid' } }, { $group: { _id: null, total: { $sum: '$amount' } } }])
+    Order.countDocuments({ ...visibleFilter, status: 'pending_payment' }),
+    Order.countDocuments({ ...visibleFilter, status: 'paid' }),
+    Order.countDocuments({ ...visibleFilter, status: 'awaiting_verification' }),
+    Order.aggregate([{ $match: { ...visibleFilter, status: 'paid' } }, { $group: { _id: null, total: { $sum: '$amount' } } }])
   ]);
   return res.json({ success: true, data: {
     productCount,
@@ -1103,13 +1171,13 @@ app.get('/api/admin/summary', verifyAdmin, async (req, res) => {
 });
 
 app.get('/api/admin/orders/pending', verifyAdmin, async (req, res) => {
-  const orders = await Order.find({ status: 'awaiting_verification' }).sort({ updatedAt: -1 });
+  const orders = await Order.find({ hiddenFromAdmin: { $ne: true }, status: 'awaiting_verification' }).sort({ updatedAt: -1 });
   return res.json({ success: true, count: orders.length, data: orders.map((order) => serializeOrder(order, req)) });
 });
 
 app.get('/api/admin/orders', verifyAdmin, async (req, res) => {
   const { status = '', q = '' } = req.query;
-  const filter = {};
+  const filter = { hiddenFromAdmin: { $ne: true } };
   if (status) filter.status = status;
   if (q) {
     const regex = new RegExp(String(q).trim(), 'i');
@@ -1126,7 +1194,7 @@ app.get('/api/admin/orders', verifyAdmin, async (req, res) => {
 });
 
 app.get('/api/admin/orders/:id', verifyAdmin, async (req, res) => {
-  const order = await Order.findById(req.params.id);
+  const order = await Order.findOne({ _id: req.params.id, hiddenFromAdmin: { $ne: true } });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
   return res.json({ success: true, data: serializeOrder(order, req) });
 });
@@ -1166,7 +1234,7 @@ app.put('/api/admin/orders/:id/verify', verifyAdmin, async (req, res) => {
 
 app.delete('/api/admin/orders/:id', verifyAdmin, async (req, res) => {
   try {
-    const order = await Order.findByIdAndDelete(req.params.id);
+    const order = await Order.findOneAndDelete({ _id: req.params.id, hiddenFromAdmin: { $ne: true } });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
     return res.json({ success: true, message: 'Transaction deleted successfully' });
   } catch (error) {
@@ -1178,7 +1246,7 @@ app.delete('/api/admin/orders/:id', verifyAdmin, async (req, res) => {
 app.delete('/api/admin/orders', verifyAdmin, async (req, res) => {
   try {
     const { status = '' } = req.query;
-    const filter = {};
+    const filter = { hiddenFromAdmin: { $ne: true } };
     if (status) filter.status = status;
     const result = await Order.deleteMany(filter);
     return res.json({ success: true, message: `${result.deletedCount} transaction${result.deletedCount === 1 ? '' : 's'} deleted`, deletedCount: result.deletedCount });
