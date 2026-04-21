@@ -32,6 +32,25 @@ const OPAY_ACCOUNT_NUMBER = process.env.OPAY_ACCOUNT_NUMBER || process.env.OPAY_
 const OPAY_ACCOUNT_PHONE = OPAY_ACCOUNT_NUMBER;
 const OPAY_WHATSAPP_NUMBER = process.env.OPAY_WHATSAPP_NUMBER || OPAY_ACCOUNT_NUMBER || '';
 const MAIL_FROM = process.env.MAIL_FROM || 'Fortunehub <hello@fortunehub.name.ng>';
+const NAIRA_SYMBOL = '\u20A6';
+
+function firstExistingPath(paths = []) {
+  return paths.find((filePath) => filePath && fs.existsSync(filePath)) || '';
+}
+
+const PDF_FONT_REGULAR_PATH = firstExistingPath([
+  path.join(__dirname, 'assets', 'fonts', 'DejaVuSans.ttf'),
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+  '/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf'
+]);
+const PDF_FONT_BOLD_PATH = firstExistingPath([
+  path.join(__dirname, 'assets', 'fonts', 'DejaVuSans-Bold.ttf'),
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+  '/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf',
+  PDF_FONT_REGULAR_PATH
+]);
+const PDF_FONT_REGULAR = PDF_FONT_REGULAR_PATH ? 'FortuneHubSans' : 'Helvetica';
+const PDF_FONT_BOLD = PDF_FONT_BOLD_PATH ? 'FortuneHubSansBold' : 'Helvetica-Bold';
 
 const resend = new Resend(RESEND_API_KEY);
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
@@ -582,7 +601,7 @@ function buildOrderSummaryCard(order, tone = 'amber') {
       <div><strong>Email:</strong> ${order.email}</div>
       <div><strong>Phone:</strong> ${order.customerPhone}</div>
       <div><strong>Total:</strong> ${formatNaira(order.amount)}</div>
-      <div><strong>Shipping:</strong> ${order.shippingState || 'N/A'}</div>
+      <div><strong>Shipping fee:</strong> ${order.shippingState || 'N/A'}</div>
       ${transactionHtml}
     </div>
   </div>`;
@@ -678,6 +697,8 @@ async function generateReceiptPdf(order, req) {
   await new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 42, size: 'A4' });
     const stream = fs.createWriteStream(outputPath);
+    if (PDF_FONT_REGULAR_PATH) doc.registerFont(PDF_FONT_REGULAR, PDF_FONT_REGULAR_PATH);
+    if (PDF_FONT_BOLD_PATH) doc.registerFont(PDF_FONT_BOLD, PDF_FONT_BOLD_PATH);
     doc.pipe(stream);
 
     const pageWidth = doc.page.width;
@@ -697,37 +718,37 @@ async function generateReceiptPdf(order, req) {
 
     doc.roundedRect(left + 12, 42, usableWidth - 24, 80, 20).fillOpacity(0.14).fill('#ffffff');
     doc.fillOpacity(1);
-    doc.fillColor('#ffffff').fontSize(11).font('Helvetica-Bold').text('OFFICIAL PAYMENT RECEIPT', left, 52, { width: usableWidth, align: 'center' });
+    doc.fillColor('#ffffff').fontSize(11).font(PDF_FONT_BOLD).text('OFFICIAL PAYMENT RECEIPT', left, 52, { width: usableWidth, align: 'center' });
     doc.fontSize(24).text('FortuneHub', left, 68, { width: usableWidth, align: 'center' });
-    doc.font('Helvetica').fontSize(10.5).text(`Order Ref: ${order.orderRef}`, left, 96, { width: usableWidth, align: 'center' });
+    doc.font(PDF_FONT_REGULAR).fontSize(10.5).text(`Order Ref: ${order.orderRef}`, left, 96, { width: usableWidth, align: 'center' });
     doc.text(`Issued: ${formatDateWAT(order.verifiedAt || new Date())}`, left, 110, { width: usableWidth, align: 'center' });
 
     let y = 154;
-    doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Customer details', left, y);
+    doc.fillColor('#111827').font(PDF_FONT_BOLD).fontSize(12).text('Customer details', left, y);
     y += 16;
 
     const detailRows = [
       ['Name', order.customerName],
       ['Email', order.email],
       ['Phone', order.customerPhone],
-      ['Shipping state', order.shippingState || 'N/A'],
+      ['Shipping fee', order.shippingState || 'N/A'],
       ['Payment method', `Bank transfer (${OPAY_BANK_NAME})`],
       ...optionalDetailRows
     ];
 
     detailRows.forEach(([label, value]) => {
       doc.roundedRect(left, y, usableWidth, 24, 8).fill('#f8fafc');
-      doc.fillColor('#6b7280').font('Helvetica-Bold').fontSize(9.5).text(label.toUpperCase(), left + 12, y + 8, { width: 150 });
-      doc.fillColor('#111827').font('Helvetica').fontSize(10.5).text(String(value || '—'), left + 165, y + 7, { width: usableWidth - 177, align: 'left' });
+      doc.fillColor('#6b7280').font(PDF_FONT_BOLD).fontSize(9.5).text(label.toUpperCase(), left + 12, y + 8, { width: 150 });
+      doc.fillColor('#111827').font(PDF_FONT_REGULAR).fontSize(10.5).text(String(value || '—'), left + 165, y + 7, { width: usableWidth - 177, align: 'left' });
       y += 30;
     });
 
     y += 6;
-    doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Items purchased', left, y);
+    doc.fillColor('#111827').font(PDF_FONT_BOLD).fontSize(12).text('Items purchased', left, y);
     y += 18;
 
     doc.roundedRect(left, y, usableWidth, 28, 10).fill('#eef2ff');
-    doc.fillColor('#374151').font('Helvetica-Bold').fontSize(10).text('Item', left + 14, y + 9, { width: 290 });
+    doc.fillColor('#374151').font(PDF_FONT_BOLD).fontSize(10).text('Item', left + 14, y + 9, { width: 290 });
     doc.text('Qty', left + 312, y + 9, { width: 46, align: 'center' });
     doc.text('Amount', right - 116, y + 9, { width: 96, align: 'right' });
     y += 38;
@@ -742,9 +763,9 @@ async function generateReceiptPdf(order, req) {
       if (index % 2 === 0) {
         doc.roundedRect(left, y - 4, usableWidth, rowHeight + 8, 8).fill('#fcfcff');
       }
-      doc.fillColor('#111827').font('Helvetica').fontSize(10.5).text(itemName, left + 14, y, { width: 290 });
+      doc.fillColor('#111827').font(PDF_FONT_REGULAR).fontSize(10.5).text(itemName, left + 14, y, { width: 290 });
       doc.fillColor('#374151').text(quantity, left + 312, y, { width: 46, align: 'center' });
-      doc.fillColor('#111827').font('Helvetica-Bold').text(amount, right - 116, y, { width: 96, align: 'right' });
+      doc.fillColor('#111827').font(PDF_FONT_BOLD).text(amount, right - 116, y, { width: 96, align: 'right' });
       y += rowHeight + 8;
     });
 
@@ -752,16 +773,16 @@ async function generateReceiptPdf(order, req) {
     const summaryWidth = 214;
     const summaryLeft = right - summaryWidth;
     doc.roundedRect(summaryLeft, y, summaryWidth, 118, 18).fill('#f8fafc');
-    doc.fillColor('#4b5563').font('Helvetica-Bold').fontSize(10).text('PAYMENT SUMMARY', summaryLeft + 16, y + 14, { width: summaryWidth - 32 });
+    doc.fillColor('#4b5563').font(PDF_FONT_BOLD).fontSize(10).text('PAYMENT SUMMARY', summaryLeft + 16, y + 14, { width: summaryWidth - 32 });
 
     const drawSummaryRow = (label, value, rowY, emphasize = false) => {
       if (emphasize) {
         doc.roundedRect(summaryLeft + 12, rowY - 6, summaryWidth - 24, 36, 12).fill('#10b981');
-        doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(10).text(label.toUpperCase(), summaryLeft + 24, rowY + 7, { width: 88 });
+        doc.fillColor('#ffffff').font(PDF_FONT_BOLD).fontSize(10).text(label.toUpperCase(), summaryLeft + 24, rowY + 7, { width: 88 });
         doc.fontSize(13).text(value, summaryLeft + 100, rowY + 5, { width: summaryWidth - 124, align: 'right' });
       } else {
-        doc.fillColor('#6b7280').font('Helvetica-Bold').fontSize(10).text(label.toUpperCase(), summaryLeft + 16, rowY, { width: 90 });
-        doc.fillColor('#111827').font('Helvetica-Bold').fontSize(11.5).text(value, summaryLeft + 98, rowY - 1, { width: summaryWidth - 114, align: 'right' });
+        doc.fillColor('#6b7280').font(PDF_FONT_BOLD).fontSize(10).text(label.toUpperCase(), summaryLeft + 16, rowY, { width: 90 });
+        doc.fillColor('#111827').font(PDF_FONT_BOLD).fontSize(11.5).text(value, summaryLeft + 98, rowY - 1, { width: summaryWidth - 114, align: 'right' });
       }
     };
 
@@ -770,7 +791,7 @@ async function generateReceiptPdf(order, req) {
     drawSummaryRow('Total paid', formatNaira(order.amount), y + 90, true);
 
     y += 142;
-    doc.fillColor('#6b7280').font('Helvetica').fontSize(10).text(`Verified by: ${order.verifiedBy || 'Admin'}`, left, y);
+    doc.fillColor('#6b7280').font(PDF_FONT_REGULAR).fontSize(10).text(`Verified by: ${order.verifiedBy || 'Admin'}`, left, y);
     doc.text('Thank you for shopping with FortuneHub.', left, y + 16);
 
     doc.end();
@@ -1037,12 +1058,6 @@ app.post('/api/orders/:id/proof', authMiddleware, (req, res, next) => {
         html: buildAdminProofEmail(order, req)
       });
     }
-
-    await sendEmail({
-      to: order.email,
-      subject: `We received your payment proof for ${order.orderRef}`,
-      html: buildBuyerProofReceivedEmail(order, req)
-    });
 
     return res.json({ success: true, message: 'Payment proof uploaded. Awaiting verification.', data: serializeOrder(order, req) });
   } catch (error) {
