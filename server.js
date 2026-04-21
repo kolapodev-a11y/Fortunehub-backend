@@ -314,11 +314,50 @@ function buildFrontendAssetUrl(assetPath = '') {
 
 function resolveDisplayImage(url, req) {
   const value = String(url || '').trim();
-  if (!value) return buildFrontendAssetUrl('/favicon.png');
+  if (!value) return '';
   if (/^(https?:|data:)/i.test(value)) return value;
   if (value.startsWith('/uploads/')) return buildPublicFileUrl(value, req);
   if (value.startsWith('/')) return buildFrontendAssetUrl(value);
   return buildFrontendAssetUrl(value);
+}
+
+function getProductImageValue(product) {
+  if (!product) return '';
+  const galleryImage = Array.isArray(product.images) ? product.images.find(Boolean) : '';
+  return String(product.image || galleryImage || '').trim();
+}
+
+async function hydrateOrderItems(items = []) {
+  const normalizedItems = Array.isArray(items) ? items.map((item) => ({
+    productId: String(item.productId || item.id || '').trim(),
+    name: String(item.name || '').trim(),
+    price: Number(item.price || 0),
+    quantity: Math.max(1, Number(item.quantity || 1)),
+    image: String(item.image || '').trim()
+  })).filter((item) => item.name && item.price >= 0) : [];
+
+  const productIds = [...new Set(normalizedItems
+    .map((item) => item.productId.replace(/^db_/, ''))
+    .filter(Boolean))];
+
+  const productMap = new Map();
+  if (productIds.length) {
+    const docs = await Product.find({ _id: { $in: productIds } }).select('_id name image images').lean();
+    docs.forEach((product) => productMap.set(String(product._id), product));
+  }
+
+  return normalizedItems.map((item) => {
+    const normalizedId = item.productId.replace(/^db_/, '');
+    const product = productMap.get(normalizedId) || [...productMap.values()].find((candidate) => String(candidate.name || '').trim().toLowerCase() === item.name.toLowerCase());
+    const resolvedImage = item.image || getProductImageValue(product);
+    return {
+      productId: item.productId || normalizedId,
+      name: item.name,
+      price: item.price,
+      quantity: item.quantity,
+      image: resolvedImage
+    };
+  });
 }
 
 function mapProduct(product) {
@@ -477,11 +516,14 @@ function timelineHtml(order) {
 function itemRowsHtml(order, req) {
   return (order.items || []).map((item) => {
     const imageUrl = resolveDisplayImage(item.image || '', req);
+    const thumb = imageUrl
+      ? `<td style="padding-right:12px;vertical-align:top;"><img src="${imageUrl}" alt="${item.name}" width="54" height="54" style="display:block;width:54px;height:54px;border-radius:14px;object-fit:cover;border:1px solid #e5e7eb;background:#fff;" /></td>`
+      : `<td style="padding-right:12px;vertical-align:top;"><div style="width:54px;height:54px;border-radius:14px;background:linear-gradient(135deg,rgba(102,126,234,.12),rgba(118,75,162,.12));display:flex;align-items:center;justify-content:center;color:#4361ee;border:1px dashed rgba(102,126,234,.2);font-size:22px;">📦</div></td>`;
     return `<tr>
       <td style="padding:12px 0;border-bottom:1px solid #eef2f7;vertical-align:top;">
         <table cellpadding="0" cellspacing="0" border="0">
           <tr>
-            <td style="padding-right:12px;vertical-align:top;"><img src="${imageUrl}" alt="${item.name}" width="54" height="54" style="display:block;width:54px;height:54px;border-radius:14px;object-fit:cover;border:1px solid #e5e7eb;background:#fff;" /></td>
+            ${thumb}
             <td style="vertical-align:top;"><div style="font-weight:700;color:#111827;line-height:1.45;">${item.name}</div></td>
           </tr>
         </table>
@@ -595,59 +637,73 @@ async function generateReceiptPdf(order, req) {
   const publicPath = `/uploads/receipts/${fileName}`;
 
   await new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50, size: 'A4' });
+    const doc = new PDFDocument({ margin: 42, size: 'A4' });
     const stream = fs.createWriteStream(outputPath);
     doc.pipe(stream);
 
-    doc.fontSize(24).fillColor('#1f2937').text('FortuneHub Receipt', { align: 'center' });
-    doc.moveDown(0.6);
-    doc.fontSize(12).fillColor('#6b7280').text(`Order Ref: ${order.orderRef}`, { align: 'center' });
-    doc.text(`Issued: ${formatDateWAT(order.verifiedAt || new Date())}`, { align: 'center' });
-    doc.moveDown(1.5);
+    const pageWidth = doc.page.width;
+    const usableWidth = pageWidth - 84;
+    const left = 42;
+    const right = pageWidth - 42;
 
-    doc.fontSize(14).fillColor('#111827').text('Customer Details');
-    doc.moveDown(0.4);
-    doc.fontSize(11).fillColor('#374151');
-    doc.text(`Name: ${order.customerName}`);
-    doc.text(`Email: ${order.email}`);
-    doc.text(`Phone: ${order.customerPhone}`);
-    doc.text(`Shipping State: ${order.shippingState || 'N/A'}`);
-    doc.text(`Payment Method: Bank transfer (${OPAY_BANK_NAME})`);
-    doc.text(`Transaction ID: ${order.transactionId || 'Not provided'}`);
-    doc.moveDown(1.2);
+    doc.roundedRect(left, 34, usableWidth, 86, 22).fill('#f8f9ff');
+    doc.fillColor('#111827').fontSize(23).text('FortuneHub Receipt', left, 54, { width: usableWidth, align: 'center' });
+    doc.fillColor('#6b7280').fontSize(11).text(`Order Ref: ${order.orderRef}`, left, 84, { width: usableWidth, align: 'center' });
+    doc.text(`Issued: ${formatDateWAT(order.verifiedAt || new Date())}`, left, 100, { width: usableWidth, align: 'center' });
 
-    doc.fontSize(14).fillColor('#111827').text('Items');
-    doc.moveDown(0.5);
-
-    const startY = doc.y;
-    doc.fontSize(11).fillColor('#6b7280');
-    doc.text('Item', 50, startY);
-    doc.text('Qty', 320, startY, { width: 50, align: 'center' });
-    doc.text('Price', 400, startY, { width: 140, align: 'right' });
-    doc.moveTo(50, startY + 18).lineTo(545, startY + 18).strokeColor('#e5e7eb').stroke();
-
-    let y = startY + 28;
-    order.items.forEach((item) => {
-      doc.fontSize(11).fillColor('#111827');
-      doc.text(item.name, 50, y, { width: 250 });
-      doc.text(String(item.quantity || 1), 320, y, { width: 50, align: 'center' });
-      doc.text(formatNaira(Number(item.price || 0) * Number(item.quantity || 1)), 400, y, { width: 140, align: 'right' });
-      y += 24;
+    let y = 142;
+    doc.fillColor('#111827').fontSize(12).text('Customer details', left, y);
+    y += 20;
+    const detailRows = [
+      ['Name', order.customerName],
+      ['Email', order.email],
+      ['Phone', order.customerPhone],
+      ['Shipping state', order.shippingState || 'N/A'],
+      ['Payment method', `Bank transfer (${OPAY_BANK_NAME})`],
+      ['Transaction ID', order.transactionId || 'Not provided']
+    ];
+    detailRows.forEach(([label, value], index) => {
+      const rowY = y + (index * 18);
+      doc.fillColor('#6b7280').fontSize(10).text(`${label}:`, left, rowY, { width: 110 });
+      doc.fillColor('#111827').fontSize(10.5).text(String(value || '—'), left + 112, rowY, { width: usableWidth - 112 });
     });
 
-    y += 10;
-    doc.moveTo(50, y).lineTo(545, y).strokeColor('#e5e7eb').stroke();
-    y += 15;
-    doc.fontSize(12).fillColor('#374151');
-    doc.text(`Subtotal: ${formatNaira(order.subtotal)}`, 340, y, { width: 200, align: 'right' });
+    y += (detailRows.length * 18) + 18;
+    doc.fillColor('#111827').fontSize(12).text('Items purchased', left, y);
     y += 20;
-    doc.text(`Shipping: ${formatNaira(order.shippingFee)}`, 340, y, { width: 200, align: 'right' });
-    y += 20;
-    doc.fontSize(14).fillColor('#10b981').text(`Total Paid: ${formatNaira(order.amount)}`, 320, y, { width: 220, align: 'right' });
 
-    y += 40;
-    doc.fontSize(11).fillColor('#6b7280').text(`Verified by: ${order.verifiedBy || 'Admin'}`, 50, y);
-    doc.text('Thank you for shopping with FortuneHub.', 50, y + 20);
+    doc.roundedRect(left, y, usableWidth, 28, 10).fill('#eef2ff');
+    doc.fillColor('#4b5563').fontSize(10).text('Item', left + 12, y + 9, { width: 260 });
+    doc.text('Qty', left + 288, y + 9, { width: 60, align: 'center' });
+    doc.text('Amount', right - 120, y + 9, { width: 100, align: 'right' });
+    y += 38;
+
+    (order.items || []).forEach((item) => {
+      const itemName = String(item.name || 'Item');
+      const quantity = String(item.quantity || 1);
+      const amount = formatNaira(Number(item.price || 0) * Number(item.quantity || 1));
+      const nameHeight = doc.heightOfString(itemName, { width: 260, align: 'left' });
+      const rowHeight = Math.max(22, nameHeight + 8);
+
+      doc.strokeColor('#e5e7eb').moveTo(left, y - 6).lineTo(right, y - 6).stroke();
+      doc.fillColor('#111827').fontSize(10.5).text(itemName, left + 12, y, { width: 260 });
+      doc.fillColor('#374151').text(quantity, left + 288, y, { width: 60, align: 'center' });
+      doc.fillColor('#111827').text(amount, right - 120, y, { width: 100, align: 'right' });
+      y += rowHeight;
+    });
+
+    y += 8;
+    doc.strokeColor('#d1d5db').moveTo(left, y).lineTo(right, y).stroke();
+    y += 14;
+    doc.fillColor('#4b5563').fontSize(10.5).text(`Subtotal: ${formatNaira(order.subtotal)}`, right - 180, y, { width: 160, align: 'right' });
+    y += 18;
+    doc.text(`Shipping: ${formatNaira(order.shippingFee)}`, right - 180, y, { width: 160, align: 'right' });
+    y += 20;
+    doc.fillColor('#059669').fontSize(13).text(`Total Paid: ${formatNaira(order.amount)}`, right - 180, y, { width: 160, align: 'right' });
+
+    y += 34;
+    doc.fillColor('#6b7280').fontSize(10).text(`Verified by: ${order.verifiedBy || 'Admin'}`, left, y);
+    doc.text('Thank you for shopping with FortuneHub.', left, y + 16);
 
     doc.end();
     stream.on('finish', resolve);
@@ -838,13 +894,7 @@ app.post('/api/orders', authMiddleware, async (req, res) => {
     if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ success: false, message: 'Cart items are required' });
     if (!customerPhone) return res.status(400).json({ success: false, message: 'Customer phone is required' });
 
-    const normalizedItems = items.map((item) => ({
-      productId: String(item.id || item.productId || ''),
-      name: String(item.name || '').trim(),
-      price: Number(item.price || 0),
-      quantity: Math.max(1, Number(item.quantity || 1)),
-      image: String(item.image || '')
-    })).filter((item) => item.name && item.price >= 0);
+    const normalizedItems = await hydrateOrderItems(items);
 
     if (!normalizedItems.length) return res.status(400).json({ success: false, message: 'No valid cart items supplied' });
 
@@ -1028,6 +1078,30 @@ app.put('/api/admin/orders/:id/verify', verifyAdmin, async (req, res) => {
   } catch (error) {
     console.error('❌ Verify order error:', error);
     return res.status(500).json({ success: false, message: 'Could not verify order' });
+  }
+});
+
+app.delete('/api/admin/orders/:id', verifyAdmin, async (req, res) => {
+  try {
+    const order = await Order.findByIdAndDelete(req.params.id);
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    return res.json({ success: true, message: 'Transaction deleted successfully' });
+  } catch (error) {
+    console.error('❌ Delete order error:', error);
+    return res.status(500).json({ success: false, message: 'Could not delete order' });
+  }
+});
+
+app.delete('/api/admin/orders', verifyAdmin, async (req, res) => {
+  try {
+    const { status = '' } = req.query;
+    const filter = {};
+    if (status) filter.status = status;
+    const result = await Order.deleteMany(filter);
+    return res.json({ success: true, message: `${result.deletedCount} transaction${result.deletedCount === 1 ? '' : 's'} deleted`, deletedCount: result.deletedCount });
+  } catch (error) {
+    console.error('❌ Clear orders error:', error);
+    return res.status(500).json({ success: false, message: 'Could not clear transactions' });
   }
 });
 
