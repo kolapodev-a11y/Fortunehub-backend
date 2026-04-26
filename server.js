@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const compression = require('compression');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
@@ -13,6 +14,8 @@ const { Resend } = require('resend');
 require('dotenv').config();
 
 const app = express();
+app.disable('x-powered-by');
+app.use(compression({ threshold: 1024 }));
 
 const PORT = process.env.PORT || 10000;
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -106,7 +109,11 @@ app.use(cors({
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
-app.use('/uploads', express.static(uploadsDir));
+app.use('/uploads', express.static(uploadsDir, {
+  maxAge: '30d',
+  immutable: true,
+  index: false
+}));
 
 app.use((err, req, res, next) => {
   if (err && (err.type === 'entity.too.large' || err.status === 413)) {
@@ -857,6 +864,7 @@ app.get('/', (req, res) => res.json({ success: true, message: 'FortuneHub backen
 app.get('/health', (req, res) => res.json({ success: true, status: 'ok', dbState: mongoose.connection.readyState }));
 
 app.get('/api/config/payment', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=900, s-maxage=900, stale-while-revalidate=86400');
   res.json({
     success: true,
     data: {
@@ -1258,8 +1266,12 @@ app.delete('/api/admin/orders', verifyAdmin, async (req, res) => {
 
 app.get('/api/products', async (req, res) => {
   try {
-    const products = await Product.find().sort({ createdAt: -1 });
-    res.set('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=60');
+    const products = await Product.find()
+      .select('name price category description image images tag outOfStock sold statusIndicator createdAt')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.set('Cache-Control', 'public, max-age=600, s-maxage=600, stale-while-revalidate=86400');
     return res.json({ success: true, count: products.length, data: products.map(mapProduct) });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
