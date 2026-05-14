@@ -200,6 +200,10 @@ const productSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+productSchema.index({ createdAt: -1 });
+productSchema.index({ category: 1, createdAt: -1 });
+productSchema.index({ sold: 1, outOfStock: 1, tag: 1, createdAt: -1 });
+
 const orderItemSchema = new mongoose.Schema({
   productId: { type: String, default: '' },
   name: { type: String, required: true },
@@ -253,6 +257,23 @@ orderSchema.pre('save', function saveUpdatedAt(next) {
 const User = mongoose.model('User', userSchema);
 const Product = mongoose.model('Product', productSchema);
 const Order = mongoose.model('Order', orderSchema);
+
+async function ensureProductIndexes() {
+  if (mongoose.connection.readyState !== 1) return;
+  try {
+    await Product.syncIndexes();
+    console.log('✅ Product indexes synced');
+  } catch (error) {
+    console.log('ℹ️ Product index sync skipped:', error.message);
+  }
+}
+
+mongoose.connection.once('connected', () => {
+  ensureProductIndexes().catch(() => {});
+});
+if (mongoose.connection.readyState === 1) {
+  ensureProductIndexes().catch(() => {});
+}
 
 function issueJWT(user) {
   return jwt.sign({
@@ -437,6 +458,74 @@ function mapProduct(product) {
     sold: product.sold,
     statusIndicator: product.statusIndicator
   };
+}
+
+function clampPositiveInt(value, fallback, max = 100) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, max);
+}
+
+function escapeRegex(value = '') {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\$&');
+}
+
+function buildProductFilter(query = {}) {
+  const filter = {};
+  const category = String(query.category || '').trim().toLowerCase();
+  const status = String(query.status || '').trim().toLowerCase();
+  const searchTerm = String(query.q || '').trim();
+
+  if (category && category !== 'all') {
+    filter.category = category;
+  }
+
+  if (status === 'instock') {
+    filter.outOfStock = { $ne: true };
+    filter.sold = { $ne: true };
+  } else if (status === 'outofstock') {
+    filter.outOfStock = true;
+  } else if (status === 'sold') {
+    filter.sold = true;
+  } else if (status === 'new') {
+    filter.tag = 'new';
+  } else if (status === 'sale') {
+    filter.tag = 'sale';
+  }
+
+  if (searchTerm) {
+    const safeTerm = escapeRegex(searchTerm);
+    filter.$or = [
+      { name: { $regex: safeTerm, $options: 'i' } },
+      { category: { $regex: safeTerm, $options: 'i' } },
+      { description: { $regex: safeTerm, $options: 'i' } }
+    ];
+  }
+
+  return filter;
+}
+
+async function getProductSummary() {
+  const [totalProducts, inStock, outOfStock, sold] = await Promise.all([
+    Product.countDocuments({}),
+    Product.countDocuments({ sold: { $ne: true }, outOfStock: { $ne: true } }),
+    Product.countDocuments({ sold: { $ne: true }, outOfStock: true }),
+    Product.countDocuments({ sold: true })
+  ]);
+
+  return { totalProducts, inStock, outOfStock, sold };
+}
+
+async function getCategoryCounts() {
+  const rows = await Product.aggregate([
+    { $group: { _id: '$category', count: { $sum: 1 } } }
+  ]);
+
+  return rows.reduce((acc, row) => {
+    const key = String(row._id || 'other').toLowerCase();
+    acc[key] = Number(row.count || 0);
+    return acc;
+  }, {});
 }
 
 function serializeOrder(order, req) {
@@ -1266,13 +1355,53 @@ app.delete('/api/admin/orders', verifyAdmin, async (req, res) => {
 
 app.get('/api/products', async (req, res) => {
   try {
-    const products = await Product.find()
+    const page = clampPositiveInt(req.query.page, 1, 10000);
+    const limit = clampPositiveInt(req.query.limit, 24, 100);
+    const filter = buildProductFilter(req.query);
+    const includeCategoryCounts = String(req.query.includeCategoryCounts || '').toLowerCase() === 'true';
+    const includeSummary = String(req.query.includeSummary || '').toLowerCase() === 'true' || String(req.query.adminView || '') === '1';
+
+    const [total, categoryCounts, summary] = await Promise.all([
+      Product.countDocuments(filter),
+      includeCategoryCounts ? getCategoryCounts() : Promise.resolve(null),
+      includeSummary ? getProductSummary() : Promise.resolve(null)
+    ]);
+
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const safePage = Math.min(page, totalPages);
+    const skip = (safePage - 1) * limit;
+
+    const products = await Product.find(filter)
       .select('name price category description image images tag outOfStock sold statusIndicator createdAt')
       .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
       .lean();
 
-    res.set('Cache-Control', 'public, max-age=600, s-maxage=600, stale-while-revalidate=86400');
-    return res.json({ success: true, count: products.length, data: products.map(mapProduct) });
+    if (req.query.q || req.query.category || req.query.status || String(req.query.adminView || '') === '1') {
+      res.set('Cache-Control', 'no-store');
+    } else {
+      res.set('Cache-Control', 'public, max-age=600, s-maxage=600, stale-while-revalidate=86400');
+    }
+
+    const payload = {
+      success: true,
+      count: products.length,
+      data: products.map(mapProduct),
+      pagination: {
+        page: safePage,
+        limit,
+        total,
+        totalPages,
+        hasPrev: safePage > 1,
+        hasNext: safePage < totalPages
+      }
+    };
+
+    if (categoryCounts) payload.categoryCounts = categoryCounts;
+    if (summary) payload.summary = summary;
+
+    return res.json(payload);
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
