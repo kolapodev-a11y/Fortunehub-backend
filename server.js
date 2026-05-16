@@ -23,6 +23,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'fortunehub_jwt_super_secret_2026_c
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const OWNER_EMAIL = process.env.OWNER_EMAIL || '';
+const ADMIN_EMAILS_RAW = process.env.ADMIN_EMAILS || process.env.ADMIN_EMAIL || OWNER_EMAIL || '';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'fortunehub2026';
 const ADMIN_DISPLAY_NAME = process.env.ADMIN_DISPLAY_NAME || 'FortuneHub Admin';
@@ -36,6 +37,20 @@ const OPAY_ACCOUNT_PHONE = OPAY_ACCOUNT_NUMBER;
 const OPAY_WHATSAPP_NUMBER = process.env.OPAY_WHATSAPP_NUMBER || OPAY_ACCOUNT_NUMBER || '';
 const MAIL_FROM = process.env.MAIL_FROM || 'Fortunehub <hello@fortunehub.name.ng>';
 const NAIRA_SYMBOL = '\u20A6';
+
+function normalizeEmailValue(value = '') {
+  return String(value || '').trim().toLowerCase();
+}
+
+const ADMIN_EMAILS = Array.from(new Set(ADMIN_EMAILS_RAW
+  .split(',')
+  .map((value) => normalizeEmailValue(value))
+  .filter(Boolean)));
+
+function isAdminEmail(email = '') {
+  const normalizedEmail = normalizeEmailValue(email);
+  return normalizedEmail ? ADMIN_EMAILS.includes(normalizedEmail) : false;
+}
 
 function firstExistingPath(paths = []) {
   return paths.find((filePath) => filePath && fs.existsSync(filePath)) || '';
@@ -281,8 +296,21 @@ function issueJWT(user) {
     email: user.email,
     name: user.name,
     picture: user.picture || '',
-    authProvider: user.authProvider
+    authProvider: user.authProvider,
+    isAdmin: isAdminEmail(user.email)
   }, JWT_SECRET, { expiresIn: '30d' });
+}
+
+function serializeAuthUser(user) {
+  return {
+    id: user._id,
+    email: user.email,
+    name: user.name,
+    picture: user.picture || '',
+    authProvider: user.authProvider,
+    phone: user.phone || '',
+    isAdmin: isAdminEmail(user.email)
+  };
 }
 
 function authMiddleware(req, res, next) {
@@ -1005,14 +1033,7 @@ app.post('/api/auth/google', async (req, res) => {
     }
 
     const token = issueJWT(user);
-    return res.json({ success: true, token, user: {
-      id: user._id,
-      email: user.email,
-      name: user.name,
-      picture: user.picture || '',
-      authProvider: user.authProvider,
-      phone: user.phone || ''
-    } });
+    return res.json({ success: true, token, user: serializeAuthUser(user) });
   } catch (error) {
     console.error('❌ Google auth error:', error.message);
     return res.status(401).json({ success: false, message: 'Google authentication failed' });
@@ -1036,14 +1057,7 @@ app.post('/api/auth/signup', async (req, res) => {
     });
 
     const token = issueJWT(user);
-    return res.status(201).json({ success: true, token, user: {
-      id: user._id,
-      email: user.email,
-      name: user.name,
-      picture: '',
-      authProvider: user.authProvider,
-      phone: user.phone || ''
-    } });
+    return res.status(201).json({ success: true, token, user: serializeAuthUser(user) });
   } catch (error) {
     console.error('❌ Signup error:', error.message);
     return res.status(500).json({ success: false, message: 'Could not create account' });
@@ -1062,14 +1076,7 @@ app.post('/api/auth/signin', async (req, res) => {
     if (!ok) return res.status(401).json({ success: false, message: 'Invalid email or password' });
 
     const token = issueJWT(user);
-    return res.json({ success: true, token, user: {
-      id: user._id,
-      email: user.email,
-      name: user.name,
-      picture: user.picture || '',
-      authProvider: user.authProvider,
-      phone: user.phone || ''
-    } });
+    return res.json({ success: true, token, user: serializeAuthUser(user) });
   } catch (error) {
     console.error('❌ Signin error:', error.message);
     return res.status(500).json({ success: false, message: 'Could not sign in' });
@@ -1079,28 +1086,14 @@ app.post('/api/auth/signin', async (req, res) => {
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
   const user = await User.findById(req.user.id).lean();
   if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-  return res.json({ success: true, user: {
-    id: user._id,
-    email: user.email,
-    name: user.name,
-    picture: user.picture || '',
-    authProvider: user.authProvider,
-    phone: user.phone || ''
-  } });
+  return res.json({ success: true, user: serializeAuthUser(user) });
 });
 
 app.patch('/api/auth/me', authMiddleware, async (req, res) => {
   const { phone } = req.body || {};
   const user = await User.findByIdAndUpdate(req.user.id, { phone: String(phone || '').trim() }, { new: true });
   if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-  return res.json({ success: true, user: {
-    id: user._id,
-    email: user.email,
-    name: user.name,
-    picture: user.picture || '',
-    authProvider: user.authProvider,
-    phone: user.phone || ''
-  } });
+  return res.json({ success: true, user: serializeAuthUser(user) });
 });
 
 app.post('/api/orders', authMiddleware, async (req, res) => {
