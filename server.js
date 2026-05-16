@@ -325,23 +325,39 @@ function authMiddleware(req, res, next) {
   }
 }
 
-function issueAdminJWT() {
-  return jwt.sign({
-    role: 'admin',
-    username: ADMIN_USERNAME,
-    name: ADMIN_DISPLAY_NAME
-  }, JWT_SECRET, { expiresIn: '7d' });
-}
-
-function verifyAdmin(req, res, next) {
+async function verifyAdmin(req, res, next) {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
   if (!token) return res.status(401).json({ success: false, message: 'Admin authentication required' });
+
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') throw new Error('Not admin');
-    req.admin = decoded;
-    return next();
+
+    if (decoded?.id) {
+      const user = await User.findById(decoded.id).select('_id email name authProvider').lean();
+      if (!user) return res.status(401).json({ success: false, message: 'Admin account not found' });
+      if (!isAdminEmail(user.email)) return res.status(403).json({ success: false, message: 'Admin access denied' });
+
+      req.admin = {
+        id: String(user._id),
+        email: user.email,
+        username: user.email,
+        name: user.name || user.email,
+        authProvider: user.authProvider || ''
+      };
+      return next();
+    }
+
+    if (decoded?.role === 'admin') {
+      req.admin = {
+        username: decoded.username || 'admin',
+        name: decoded.name || decoded.username || 'Admin',
+        email: decoded.email || ''
+      };
+      return next();
+    }
+
+    return res.status(403).json({ success: false, message: 'Admin access denied' });
   } catch (_) {
     return res.status(401).json({ success: false, message: 'Invalid or expired admin token' });
   }
@@ -1229,11 +1245,41 @@ app.get('/api/transactions/receipt/:reference', authMiddleware, async (req, res)
 });
 
 app.post('/api/admin/login', async (req, res) => {
-  const { username, password } = req.body || {};
-  if (username !== ADMIN_USERNAME || password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ success: false, message: 'Invalid admin credentials' });
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: 'Email and password are required' });
+    }
+
+    const user = await User.findOne({ email: String(email).toLowerCase().trim() });
+    if (!user || !user.password) {
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
+
+    const ok = await bcrypt.compare(String(password), user.password);
+    if (!ok) {
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
+
+    if (!isAdminEmail(user.email)) {
+      return res.status(403).json({ success: false, message: 'This account does not have admin access' });
+    }
+
+    const token = issueJWT(user);
+    return res.json({
+      success: true,
+      token,
+      user: serializeAuthUser(user),
+      admin: {
+        email: user.email,
+        name: user.name || user.email,
+        username: user.email
+      }
+    });
+  } catch (error) {
+    console.error('❌ Admin sign-in error:', error.message);
+    return res.status(500).json({ success: false, message: 'Could not sign in to admin panel' });
   }
-  return res.json({ success: true, token: issueAdminJWT(), admin: { username: ADMIN_USERNAME, name: ADMIN_DISPLAY_NAME } });
 });
 
 app.get('/api/admin/summary', verifyAdmin, async (req, res) => {
