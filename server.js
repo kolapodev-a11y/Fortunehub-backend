@@ -1165,12 +1165,6 @@ app.post('/api/orders/:id/cancel', authMiddleware, async (req, res) => {
     pushTimeline(order, 'cancelled', 'Order cancelled', order.email, 'Buyer cancelled pending payment before admin processing');
     await order.save();
 
-    await sendEmail({
-      to: order.email,
-      subject: `Your FortuneHub order ${order.orderRef} was cancelled`,
-      html: buildBuyerCancelledEmail(order, req)
-    });
-
     if (OWNER_EMAIL) {
       await sendEmail({
         to: OWNER_EMAIL,
