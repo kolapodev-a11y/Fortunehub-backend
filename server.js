@@ -28,14 +28,14 @@ const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'fortunehub2026';
 const ADMIN_DISPLAY_NAME = process.env.ADMIN_DISPLAY_NAME || 'FortuneHub Admin';
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').trim();
-const FRONTEND_BASE_URL = (process.env.FRONTEND_BASE_URL || 'https://fortunehub.name.ng').trim();
+const FRONTEND_BASE_URL = (process.env.FRONTEND_BASE_URL || 'https://fortunehub.ng').trim();
 const ADMIN_PANEL_URL = (process.env.ADMIN_PANEL_URL || `${FRONTEND_BASE_URL.replace(/\/$/, '')}/admin/`).trim();
 const OPAY_BANK_NAME = process.env.OPAY_BANK_NAME || 'OPay';
 const OPAY_ACCOUNT_NAME = process.env.OPAY_ACCOUNT_NAME || 'FortuneHub';
 const OPAY_ACCOUNT_NUMBER = process.env.OPAY_ACCOUNT_NUMBER || process.env.OPAY_ACCOUNT_PHONE || '';
 const OPAY_ACCOUNT_PHONE = OPAY_ACCOUNT_NUMBER;
 const OPAY_WHATSAPP_NUMBER = process.env.OPAY_WHATSAPP_NUMBER || OPAY_ACCOUNT_NUMBER || '';
-const MAIL_FROM = process.env.MAIL_FROM || 'Fortunehub <hello@fortunehub.name.ng>';
+const MAIL_FROM = process.env.MAIL_FROM || 'Fortunehub <hello@fortunehub.ng>';
 const NAIRA_SYMBOL = '\u20A6';
 
 function normalizeEmailValue(value = '') {
@@ -83,8 +83,8 @@ for (const dir of [uploadsDir, proofsDir, receiptsDir, emailAssetsDir]) {
 
 const DEFAULT_ALLOWED_ORIGINS = [
   'https://kolapodev-a11y.github.io',
-  'https://fortunehub.name.ng',
-  'https://www.fortunehub.name.ng',
+  'https://fortunehub.ng',
+  'https://www.fortunehub.ng',
   'https://fortunehub-frontend.vercel.app',
   'http://localhost:3000',
   'http://localhost:5000',
